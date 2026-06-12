@@ -13,6 +13,13 @@ cd "$DIR" || exit 1
 pb=0
 cooldown=0   # lecturas restantes de silencio tras una alerta (evita spam)
 
+# --- Alertas de ZONAS (niveles S/R marcados en scripts/zonas.env) ---
+# Avisan al ACERCARSE o ROMPER tus niveles, INDEPENDIENTE de la señal A+.
+# Se relee zonas.env en cada vuelta, así editar el archivo aplica al toque.
+ZONE_ALERTS="${ZONE_ALERTS:-1}"       # 1 = avisar al tocar zonas; 0 = desactivar
+ZONE_THRESH="${ZONE_THRESH:-0.0015}"  # proximidad: 0.15% del precio (~$2.5 en ETH)
+ZONES_STATE="{}"                       # estado previo por nivel (para detectar cruces)
+
 while true; do
   # Datos desde Binance (volumen REAL). El feed de Capital.com en TV no entrega
   # volumen (siempre 1); ver scripts/ohlcv_binance.js. Vero sigue OPERANDO en
@@ -24,6 +31,24 @@ while true; do
   [ "$cooldown" -gt 0 ] && cooldown=$((cooldown-1))
 
   if [ "$P" = "0" ] || [ -z "$P" ]; then echo "$(date '+%H:%M:%S') sin datos"; sleep 6; continue; fi
+
+  # --- ZONAS: avisa al ACERCARSE o ROMPER tus niveles. Corre SIEMPRE, antes
+  #     de los filtros, así te enteras aunque el mercado esté choppy/muerto. ---
+  if [ "$ZONE_ALERTS" = "1" ]; then
+    ZONAS=$(grep -E '^export ZONAS=' scripts/zonas.env 2>/dev/null | sed 's/.*="//; s/".*//')
+    if [ -n "$ZONAS" ]; then
+      ZRES=$(PRICE="$P" LEVELS="$ZONAS" PREV="$ZONES_STATE" THRESH="$ZONE_THRESH" "$NODE" scripts/level_alert.js 2>/dev/null)
+      NEWZ=$(echo "$ZRES" | "$NODE" -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.stringify(JSON.parse(s).state))}catch(e){console.log('')}})")
+      [ -n "$NEWZ" ] && ZONES_STATE="$NEWZ"
+      echo "$ZRES" | "$NODE" -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{(JSON.parse(s).alerts||[]).forEach(a=>console.log(a))}catch(e){}})" | while IFS= read -r A; do
+        [ -z "$A" ] && continue
+        # ruptura al alza = verde (Hero), a la baja = rojo (Basso), proximidad = info (Glass)
+        case "$A" in *ALZA*) SND=Hero;; *BAJA*) SND=Basso;; *) SND=Glass;; esac
+        echo "$(date '+%H:%M:%S') ZONA: $A"
+        ./scripts/notify.sh "Zona ETH" "$A" "$SND"
+      done
+    fi
+  fi
 
   # FILTRO LIQUIDEZ: si el volumen absoluto es ridículo (<50), mercado muerto
   # sin liquidez (madrugada) -> movimientos fantasma, NO operar.
