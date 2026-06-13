@@ -1,0 +1,97 @@
+{
+  "backed_up_at": "2026-06-12T20:27:53.636Z",
+  "symbol": "CAPITALCOM:ETHUSD",
+  "count": 9,
+  "shapes": [
+    {
+      "id": "uPM0xE",
+      "name": "horizontal_line",
+      "points": [
+        {
+          "price": 1679.9,
+          "time": 1781026200
+        }
+      ]
+    },
+    {
+      "id": "hx6rQF",
+      "name": "horizontal_line",
+      "points": [
+        {
+          "price": 1692,
+          "time": 1783444500
+        }
+      ]
+    },
+    {
+      "id": "U3aNGF",
+      "name": "horizontal_line",
+      "points": [
+        {
+          "price": 1682.8,
+          "time": 1783444500
+        }
+      ]
+    },
+    {
+      "id": "0ZIv9j",
+      "name": "horizontal_line",
+      "points": [
+        {
+          "price": 1678.5,
+          "time": 1783444500
+        }
+      ]
+    },
+    {
+      "id": "fm6NUe",
+      "name": "horizontal_line",
+      "points": [
+        {
+          "price": 1672.7,
+          "time": 1783444500
+        }
+      ]
+    },
+    {
+      "id": "B4uity",
+      "name": "horizontal_line",
+      "points": [
+        {
+          "price": 1669,
+          "time": 1783444500
+        }
+      ]
+    },
+    {
+      "id": "PHk5G1",
+      "name": "horizontal_line",
+      "points": [
+        {
+          "price": 1664.4,
+          "time": 1783444500
+        }
+      ]
+    },
+    {
+      "id": "kvEQyQ",
+      "name": "horizontal_line",
+      "points": [
+        {
+          "price": 1653.5,
+          "time": 1783444500
+        }
+      ]
+    },
+    {
+      "id": "p1vXaH",
+      "name": "horizontal_line",
+      "points": [
+        {
+          "price": 1615,
+          "time": 1783444500
+        }
+      ]
+    }
+  ]
+}

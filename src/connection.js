@@ -90,6 +90,16 @@ export async function connect() {
 async function findChartTarget() {
   const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
   const targets = await resp.json();
+  // TV_TARGET_ID: fija un target específico (id completo o prefijo) cuando hay
+  // varias ventanas de chart abiertas. Sin esto se toma el primer /chart que
+  // aparezca y los monitores pueden terminar leyendo la ventana equivocada.
+  const pin = process.env.TV_TARGET_ID || '';
+  if (pin) {
+    const pinned = targets.find(t => t.type === 'page' && t.id.startsWith(pin));
+    if (pinned) return pinned;
+    // si el target fijado no existe, error explícito (no caer en silencio a otra ventana)
+    throw new Error(`TV_TARGET_ID=${pin} no coincide con ningún target CDP activo`);
+  }
   // Prefer targets with tradingview.com/chart in the URL
   return targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url))
     || targets.find(t => t.type === 'page' && /tradingview/i.test(t.url))

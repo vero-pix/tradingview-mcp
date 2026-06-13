@@ -1,0 +1,221 @@
+//@version=6
+// ─────────────────────────────────────────────────────────────────────────────
+// BOS Estructura · Sesión NY — multi-activo (EURUSD 5m / ETHUSD 5m)
+//
+// Lógica: Break of Structure sobre swings de ta.pivothigh/pivotlow(5,5).
+//   LONG  = close cruza sobre el último swing high y close > EMA200
+//   SHORT = close cruza bajo el último swing low  y close < EMA200
+// Sesión NY 09:45–16:00 (America/New_York; ya descuenta los primeros 15 min),
+// máx N entradas/día, cierre forzado al fin de sesión (intradía puro).
+// Riesgo: SL = ATR(14)×1.5 · TP = SL×RR (input) · qty = riesgo% / distancia SL.
+//
+// Notas (decisiones de diseño):
+//  · process_orders_on_close=true → la entrada llena al cierre de la vela de
+//    señal, así el SL/TP calculado desde `close` coincide con la ejecución.
+//  · Los pivotes (5,5) se CONFIRMAN 5 velas después de formarse — el BOS puede
+//    detectarse durante esa confirmación; es el lag normal de esta técnica.
+//  · alertcondition() solo admite texto constante (placeholders {{close}} etc).
+//    Para webhooks con SL/TP reales se usa alert() con JSON dinámico.
+//  · En ETH (24/7) puedes apagar "Operar solo sesión NY"; por defecto va ON
+//    porque la sesión NY concentra el volumen también en cripto.
+// ─────────────────────────────────────────────────────────────────────────────
+strategy("BOS Estructura · Sesión NY (multi-activo)", shorttitle = "BOS NY",
+     overlay = true,
+     initial_capital = 10000,
+     currency = currency.USD,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.01,
+     slippage = 1,
+     process_orders_on_close = true,
+     calc_on_every_tick = false,
+     max_lines_count = 500,
+     max_labels_count = 500)
+
+// ── Inputs ───────────────────────────────────────────────────────────────────
+grpE = "Ejecución"
+grpR = "Riesgo"
+grpS = "Sesión"
+grpX = "Estructura"
+
+execOn   = input.bool(true,  "Ejecutar órdenes (strategy.entry)", group = grpE)
+showHist = input.bool(true,  "Mostrar histórico SL/TP",           group = grpE)
+
+riskPct  = input.float(1.0,  "Riesgo por trade (% del capital)",  minval = 0.1, maxval = 10, step = 0.1, group = grpR)
+atrLen   = input.int(14,     "ATR — período",                     minval = 1,   group = grpR)
+atrMult  = input.float(1.5,  "SL = ATR ×",                        minval = 0.1, step = 0.1,  group = grpR)
+rrMult   = input.float(1.0,  "TP : SL (múltiplo R)",              minval = 0.25, step = 0.25, group = grpR)
+
+useSess  = input.bool(true,  "Operar solo sesión NY",             group = grpS,
+     tooltip = "ON para EURUSD. En ETH (24/7) puedes apagarlo, aunque la sesión NY concentra el volumen.")
+sessWin  = input.session("0945-1600", "Ventana operable NY (09:30 + 15 min)", group = grpS)
+closeEOD = input.bool(true,  "Cerrar posición al fin de sesión (16:00 NY)",   group = grpS)
+maxDay   = input.int(2,      "Máx entradas por día",              minval = 1,  group = grpS)
+
+pivLen   = input.int(5,      "Pivot: velas por lado",             minval = 1,  group = grpX)
+emaLen   = input.int(200,    "EMA filtro de tendencia",           minval = 1,  group = grpX)
+
+TZ = "America/New_York"
+
+// ── Indicadores base (siempre fuera de condicionales, por consistencia) ──────
+ema200 = ta.ema(close, emaLen)
+atrVal = ta.atr(atrLen)
+ph     = ta.pivothigh(high, pivLen, pivLen)
+pl     = ta.pivotlow(low,  pivLen, pivLen)
+
+sessOk     = not na(time(timeframe.period, sessWin, TZ))
+inSession  = not useSess or sessOk
+sessionEnd = useSess and sessOk[1] and not sessOk
+
+// nuevo día NY → resetear contador de entradas
+var int tradesToday = 0
+if ta.change(dayofmonth(time, TZ)) != 0
+    tradesToday := 0
+
+// ── Estructura: último swing vigente + línea dashed que persiste ─────────────
+var float swingHigh    = na
+var int   swingHighBar = na
+var float swingLow     = na
+var int   swingLowBar  = na
+var line  shLine       = na
+var line  swLine       = na
+
+if not na(ph)
+    swingHigh    := ph
+    swingHighBar := bar_index - pivLen
+    shLine       := line.new(swingHighBar, ph, bar_index, ph, xloc = xloc.bar_index,
+         color = color.new(color.red, 25), style = line.style_dashed, width = 1)
+
+if not na(pl)
+    swingLow    := pl
+    swingLowBar := bar_index - pivLen
+    swLine      := line.new(swingLowBar, pl, bar_index, pl, xloc = xloc.bar_index,
+         color = color.new(color.teal, 25), style = line.style_dashed, width = 1)
+
+// extender la línea del swing vigente; al romperse queda congelada (persiste)
+if not na(shLine) and not na(swingHigh)
+    line.set_x2(shLine, bar_index)
+if not na(swLine) and not na(swingLow)
+    line.set_x2(swLine, bar_index)
+
+// ── Señales BOS ──────────────────────────────────────────────────────────────
+// cruce manual (no ta.crossover) porque swingHigh/Low son series re-asignadas
+bosUp = not na(swingHigh) and close > swingHigh and close[1] <= swingHigh
+bosDn = not na(swingLow)  and close < swingLow  and close[1] >= swingLow
+
+// estado de posición (virtual: funciona igual con ejecución apagada)
+var int   vDir    = 0
+var float entryPx = na
+var float slPx    = na
+var float tpPx    = na
+var line  slLn    = na
+var line  tpLn    = na
+
+flatNow  = vDir == 0 and strategy.position_size == 0
+canEnter = inSession and tradesToday < maxDay and flatNow
+
+longSig  = bosUp and close > ema200 and canEnter
+shortSig = bosDn and close < ema200 and canEnter
+
+slDist = atrVal * atrMult
+
+// ── Entrada LONG ─────────────────────────────────────────────────────────────
+if longSig
+    entryPx := close
+    slPx    := close - slDist
+    tpPx    := close + slDist * rrMult
+    vDir    := 1
+    tradesToday := tradesToday + 1
+    // marcar SOLO el swing que generó la entrada
+    label.new(swingHighBar, swingHigh, "BOS ▲", xloc = xloc.bar_index,
+         style = label.style_label_down, color = color.new(color.green, 10),
+         textcolor = color.white, size = size.small)
+    shLine    := na
+    swingHigh := na
+    if showHist
+        slLn := line.new(bar_index, slPx, bar_index, slPx, xloc = xloc.bar_index,
+             color = color.red,   style = line.style_dotted, width = 1)
+        tpLn := line.new(bar_index, tpPx, bar_index, tpPx, xloc = xloc.bar_index,
+             color = color.green, style = line.style_dotted, width = 1)
+    if execOn
+        float qtyL = slDist > 0 ? (strategy.equity * riskPct / 100) / slDist : na
+        if not na(qtyL) and qtyL > 0
+            strategy.entry("L", strategy.long, qty = qtyL)
+            strategy.exit("L·exit", "L", stop = slPx, limit = tpPx)
+    alert('{"signal":"long","symbol":"' + syminfo.ticker + '","entry":' + str.tostring(close, "#.#####") +
+         ',"sl":' + str.tostring(slPx, "#.#####") + ',"tp":' + str.tostring(tpPx, "#.#####") +
+         ',"riesgo_pct":' + str.tostring(riskPct) + '}', alert.freq_once_per_bar)
+
+// ── Entrada SHORT ────────────────────────────────────────────────────────────
+if shortSig
+    entryPx := close
+    slPx    := close + slDist
+    tpPx    := close - slDist * rrMult
+    vDir    := -1
+    tradesToday := tradesToday + 1
+    label.new(swingLowBar, swingLow, "BOS ▼", xloc = xloc.bar_index,
+         style = label.style_label_up, color = color.new(color.red, 10),
+         textcolor = color.white, size = size.small)
+    swLine   := na
+    swingLow := na
+    if showHist
+        slLn := line.new(bar_index, slPx, bar_index, slPx, xloc = xloc.bar_index,
+             color = color.red,   style = line.style_dotted, width = 1)
+        tpLn := line.new(bar_index, tpPx, bar_index, tpPx, xloc = xloc.bar_index,
+             color = color.green, style = line.style_dotted, width = 1)
+    if execOn
+        float qtyS = slDist > 0 ? (strategy.equity * riskPct / 100) / slDist : na
+        if not na(qtyS) and qtyS > 0
+            strategy.entry("S", strategy.short, qty = qtyS)
+            strategy.exit("S·exit", "S", stop = slPx, limit = tpPx)
+    alert('{"signal":"short","symbol":"' + syminfo.ticker + '","entry":' + str.tostring(close, "#.#####") +
+         ',"sl":' + str.tostring(slPx, "#.#####") + ',"tp":' + str.tostring(tpPx, "#.#####") +
+         ',"riesgo_pct":' + str.tostring(riskPct) + '}', alert.freq_once_per_bar)
+
+// ── Tracking de la posición (virtual) + líneas históricas SL/TP ──────────────
+if vDir == 1
+    if showHist and not na(slLn)
+        line.set_x2(slLn, bar_index)
+        line.set_x2(tpLn, bar_index)
+    if low <= slPx or high >= tpPx or (sessionEnd and closeEOD)
+        vDir := 0
+        slLn := na
+        tpLn := na
+else if vDir == -1
+    if showHist and not na(slLn)
+        line.set_x2(slLn, bar_index)
+        line.set_x2(tpLn, bar_index)
+    if high >= slPx or low <= tpPx or (sessionEnd and closeEOD)
+        vDir := 0
+        slLn := na
+        tpLn := na
+
+// cierre real forzado al terminar la sesión (intradía puro, sin overnight)
+if sessionEnd and closeEOD and execOn and strategy.position_size != 0
+    strategy.close_all(comment = "Cierre sesión NY 16:00")
+
+// ── Visual: EMA 200 naranja + panel top-right ────────────────────────────────
+plot(ema200, "EMA 200", color = color.orange, linewidth = 2)
+
+var table panel = table.new(position.top_right, 2, 5,
+     bgcolor = color.new(color.black, 15), border_width = 1,
+     border_color = color.new(color.gray, 70))
+
+if barstate.islast
+    posTxt = vDir == 1 ? "LONG" : vDir == -1 ? "SHORT" : "FLAT"
+    posCol = vDir == 1 ? color.green : vDir == -1 ? color.red : color.gray
+    table.cell(panel, 0, 0, "Posición",   text_color = color.silver, text_size = size.small)
+    table.cell(panel, 1, 0, posTxt + (execOn ? "" : " (sim)"), text_color = posCol, text_size = size.small)
+    table.cell(panel, 0, 1, "SL",         text_color = color.silver, text_size = size.small)
+    table.cell(panel, 1, 1, vDir != 0 ? str.tostring(slPx, format.mintick) : "—", text_color = color.red, text_size = size.small)
+    table.cell(panel, 0, 2, "TP",         text_color = color.silver, text_size = size.small)
+    table.cell(panel, 1, 2, vDir != 0 ? str.tostring(tpPx, format.mintick) : "—", text_color = color.green, text_size = size.small)
+    table.cell(panel, 0, 3, "Sesión NY",  text_color = color.silver, text_size = size.small)
+    table.cell(panel, 1, 3, inSession ? "ON" : "OFF", text_color = inSession ? color.green : color.gray, text_size = size.small)
+    table.cell(panel, 0, 4, "Trades hoy", text_color = color.silver, text_size = size.small)
+    table.cell(panel, 1, 4, str.tostring(tradesToday) + " / " + str.tostring(maxDay), text_color = color.white, text_size = size.small)
+
+// ── Alertas para webhooks ────────────────────────────────────────────────────
+// NOTA: alertcondition() NO funciona dentro de estrategias (warning del editor:
+// "alertcondition() has no effect inside strategies"). El JSON dinámico con
+// SL/TP reales sale por alert() en cada entrada (ver bloques de entrada arriba).
+// Para recibirlo: crear alerta sobre la estrategia con "Cualquier función alert()".
