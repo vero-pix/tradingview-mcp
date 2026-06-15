@@ -64,8 +64,19 @@ process.stdin.on("data", d => (s += d)).on("end", () => {
     // volumen ABSOLUTO reciente (prom últimas 3 cerradas): detecta mercado muerto
     //   sin liquidez (madrugada, vol=1). Bajo umbral => movimientos fantasma, no operar.
     const volabs = promUlt3;
-    // formato: precio|ema9|ema21|rsi|mom5|mom2|er|volr|volabs
-    console.log([price, e9, e21, r, mom5, mom2, er, volr, volabs].map(x => x.toFixed(2)).join("|"));
+    // ATR(14) sobre velas CERRADAS: para dimensionar el stop según volatilidad.
+    //   True Range = max(high-low, |high-closeAnt|, |low-closeAnt|). Wilder.
+    const closedBars = bars.slice(0, -1); // descarta la vela en formación
+    let atr = 0;
+    if (closedBars.length > 15) {
+      const tr = closedBars.map((b, i) => i === 0 ? b.high - b.low
+        : Math.max(b.high - b.low, Math.abs(b.high - closedBars[i-1].close), Math.abs(b.low - closedBars[i-1].close)));
+      let a = tr.slice(1, 15).reduce((s, v) => s + v, 0) / 14;
+      for (let i = 15; i < tr.length; i++) a = (a * 13 + tr[i]) / 14;
+      atr = a;
+    }
+    // formato: precio|ema9|ema21|rsi|mom5|mom2|er|volr|volabs|atr
+    console.log([price, e9, e21, r, mom5, mom2, er, volr, volabs, atr].map(x => x.toFixed(2)).join("|"));
   } catch (e) {
     console.log("0|0|0|0");
   }

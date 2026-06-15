@@ -26,7 +26,7 @@ while true; do
   # Capital.com — solo la DETECCIÓN de la señal usa datos de Binance.
   VAL=$("$NODE" scripts/ohlcv_binance.js 2>/dev/null | "$NODE" scripts/calc_indicators.js)
   P=$(echo "$VAL"|cut -d'|' -f1); E9=$(echo "$VAL"|cut -d'|' -f2); E21=$(echo "$VAL"|cut -d'|' -f3)
-  R=$(echo "$VAL"|cut -d'|' -f4); M5=$(echo "$VAL"|cut -d'|' -f5); M2=$(echo "$VAL"|cut -d'|' -f6); ER=$(echo "$VAL"|cut -d'|' -f7); VR=$(echo "$VAL"|cut -d'|' -f8); VA=$(echo "$VAL"|cut -d'|' -f9)
+  R=$(echo "$VAL"|cut -d'|' -f4); M5=$(echo "$VAL"|cut -d'|' -f5); M2=$(echo "$VAL"|cut -d'|' -f6); ER=$(echo "$VAL"|cut -d'|' -f7); VR=$(echo "$VAL"|cut -d'|' -f8); VA=$(echo "$VAL"|cut -d'|' -f9); AT=$(echo "$VAL"|cut -d'|' -f10)
 
   [ "$cooldown" -gt 0 ] && cooldown=$((cooldown-1))
 
@@ -65,8 +65,12 @@ while true; do
   REB=$("$NODE" -e "console.log(($pb==1 && $M2>=1.0 && $P>=$E9 && $R>=50 && $R<=64 && $M5>=1.0 && $VR>=1.2)?1:0)")
 
   if [ "$REB" = "1" ] && [ "$cooldown" -eq 0 ]; then
-    echo "$(date '+%H:%M:%S') >>> ENTRADA p=$P rsi=$R ER=$ER vol=$VR"
-    ./scripts/notify.sh "SEÑAL LONG · confirma VWAP · Vero" "ETH $P: DIRECCIONAL (ER=$ER) + VOLUMEN fuerte (${VR}x), rebote desde EMA9, RSI $R. CONFIRMA que esté SOBRE tu VWAP. NO promedies." "Hero"
+    # Stop = entrada − 2×ATR (volatilidad real). Objetivo = entrada + 2×ATR (RR 1:1, scalp).
+    SL=$("$NODE" -e "console.log(($P-2*$AT).toFixed(2))")
+    TP=$("$NODE" -e "console.log(($P+2*$AT).toFixed(2))")
+    RISK=$("$NODE" -e "console.log((2*$AT).toFixed(2))")
+    echo "$(date '+%H:%M:%S') >>> ENTRADA p=$P rsi=$R ER=$ER vol=$VR sl=$SL tp=$TP"
+    ./scripts/notify.sh "SEÑAL LONG · ETH $P · Vero" "✅ ENTRADA $P | 🛑 STOP $SL | 🎯 OBJETIVO $TP (riesgo \$$RISK). DIRECCIONAL (ER=$ER) + VOLUMEN ${VR}x, RSI $R. Confirma VWAP. Si pierde el STOP, SAL. NO promedies." "Hero"
     cooldown=50   # ~5 min de silencio tras avisar
     pb=0
   else
