@@ -69,8 +69,11 @@ while true; do
     SL=$("$NODE" -e "console.log(($P-2*$AT).toFixed(2))")
     TP=$("$NODE" -e "console.log(($P+2*$AT).toFixed(2))")
     RISK=$("$NODE" -e "console.log((2*$AT).toFixed(2))")
-    echo "$(date '+%H:%M:%S') >>> ENTRADA p=$P rsi=$R ER=$ER vol=$VR sl=$SL tp=$TP"
-    ./scripts/notify.sh "SEÑAL LONG · ETH $P · Vero" "✅ ENTRADA $P | 🛑 STOP $SL | 🎯 OBJETIVO $TP (riesgo \$$RISK). DIRECCIONAL (ER=$ER) + VOLUMEN ${VR}x, RSI $R. Confirma VWAP. Si pierde el STOP, SAL. NO promedies." "Hero"
+    # Precio máximo de entrada: si el precio sube >$2 sobre la señal, ya no conviene entrar
+    # porque el ratio riesgo/beneficio se invierte (el target queda muy cerca y el stop lejos).
+    MAX_ENTRY=$("$NODE" -e "console.log(($P+2).toFixed(2))")
+    echo "$(date '+%H:%M:%S') >>> ENTRADA p=$P rsi=$R ER=$ER vol=$VR sl=$SL tp=$TP maxEntry=$MAX_ENTRY"
+    ./scripts/notify.sh "SEÑAL LONG · ETH $P · Vero" "✅ ENTRADA $P | 🛑 STOP $SL | 🎯 OBJETIVO $TP (riesgo \$$RISK). DIRECCIONAL (ER=$ER) + VOLUMEN ${VR}x, RSI $R. Confirma VWAP. Si pierde el STOP, SAL. NO promedies. ⏰ CADUCA si precio > \$$MAX_ENTRY (no perseguir)." "Hero"
     cooldown=50   # ~5 min de silencio tras avisar
     pb=0
   else
