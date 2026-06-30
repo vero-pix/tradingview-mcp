@@ -5,8 +5,11 @@
 #
 #   STOP_LEVEL   nivel del stop (default 1737.5)
 #   WARN_BUFFER  cuánto antes avisar (default 0.8 -> avisa al tocar ~1738.3)
+#   USE_CAPITAL  =1 usa el BID REAL de Capital.com (API) en vez de Binance-OFFSET.
+#                Con USE_CAPITAL=1 el OFFSET NO se aplica (el bid ya es el precio de Vero).
 #
 # Uso:  STOP_LEVEL=1737.5 ./scripts/watch_stop.sh
+#       USE_CAPITAL=1 STOP_LEVEL=1558 ./scripts/watch_stop.sh   # precio real del bróker
 
 NODE="$HOME/.local/share/fnm/aliases/default/bin/node"
 [ -x "$NODE" ] || NODE="$(command -v node)"
@@ -19,13 +22,24 @@ WARN_LEVEL=$("$NODE" -e "console.log(($STOP_LEVEL+$WARN_BUFFER).toFixed(2))")
 
 state="ok"   # ok -> warn -> broken ; se re-arma al recuperar
 
-echo "$(date '+%H:%M:%S') watcher STOP arrancado: stop=$STOP_LEVEL aviso=$WARN_LEVEL (precio Capital, offset $OFFSET)"
+USE_CAPITAL="${USE_CAPITAL:-0}"
+SLEEP=6
+[ "$USE_CAPITAL" = "1" ] && SLEEP=8   # margen para el rate limit de la API
+SRC=$([ "$USE_CAPITAL" = "1" ] && echo "Capital API (bid real)" || echo "Binance-offset $OFFSET")
+
+echo "$(date '+%H:%M:%S') watcher STOP arrancado: stop=$STOP_LEVEL aviso=$WARN_LEVEL (fuente: $SRC)"
 
 while true; do
-  BP=$(BINANCE_INTERVAL=1m BINANCE_LIMIT=50 "$NODE" scripts/ohlcv_binance.js 2>/dev/null | "$NODE" -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const b=JSON.parse(s).bars;console.log(b[b.length-1].close)}catch(e){console.log('')}})")
-  if [ -z "$BP" ]; then echo "$(date '+%H:%M:%S') sin datos"; sleep 6; continue; fi
-  # convertir a precio Capital.com (lo que ve Vero en pantalla)
-  P=$("$NODE" -e "console.log(($BP-$OFFSET).toFixed(2))")
+  if [ "$USE_CAPITAL" = "1" ]; then
+    # Bid REAL de Capital.com (ya es el precio que ve Vero, sin offset)
+    P=$("$NODE" scripts/capital_price.cjs ETHUSD --field bid 2>/dev/null)
+    BP="$P"
+  else
+    BP=$(BINANCE_INTERVAL=1m BINANCE_LIMIT=50 "$NODE" scripts/ohlcv_binance.js 2>/dev/null | "$NODE" -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const b=JSON.parse(s).bars;console.log(b[b.length-1].close)}catch(e){console.log('')}})")
+    # convertir a precio Capital.com (lo que ve Vero en pantalla)
+    P=$([ -n "$BP" ] && "$NODE" -e "console.log(($BP-$OFFSET).toFixed(2))")
+  fi
+  if [ -z "$P" ]; then echo "$(date '+%H:%M:%S') sin datos"; sleep "$SLEEP"; continue; fi
 
   BROKEN=$("$NODE" -e "console.log($P<=$STOP_LEVEL?1:0)")
   NEAR=$("$NODE"   -e "console.log($P<=$WARN_LEVEL?1:0)")
@@ -46,5 +60,5 @@ while true; do
     echo "$(date '+%H:%M:%S') Capital=$P (Binance $BP) state=$state"
   fi
 
-  sleep 6
+  sleep "$SLEEP"
 done

@@ -1,0 +1,115 @@
+//@version=5
+// =============================================================================
+// Efficiency Ratio (ER) Dual — 1m + 5m
+// Autor: Vero + Claude, 2026-06-30
+//
+// Muestra dos lecturas del ER de Kaufman superpuestas:
+//   • ER 1m (línea principal): reactivo, para timing de entrada
+//   • ER 5m (línea punteada): estable, para régimen de mercado
+//
+// Señal A+ óptima: ER 5m ≥ umbral  Y  ER 1m ≥ umbral
+// =============================================================================
+
+indicator("Efficiency Ratio (ER) Dual", shorttitle="ER Dual", overlay=false)
+
+// -----------------------------------------------------------------------------
+// Parámetros
+// -----------------------------------------------------------------------------
+
+// Período del ER (aplica a ambos timeframes)
+length = input.int(10, "Período", minval=2, maxval=50, group="Configuración")
+
+// Umbral de señal: valores sobre este nivel = mercado tendencial (verde)
+umbral = input.float(0.40, "Umbral señal", minval=0.05, maxval=0.95,
+     step=0.05, group="Configuración")
+
+// Timeframe superior para el ER de contexto (por defecto 5m)
+tf_alto = input.timeframe("5", "Timeframe contexto (ER lento)",
+     group="Configuración")
+
+// Opción para mostrar/ocultar el fondo de color
+mostrar_fondo = input.bool(true, "Fondo verde cuando ER 1m >= umbral",
+     group="Visual")
+
+// -----------------------------------------------------------------------------
+// Función: calcula el ER de Kaufman sobre las barras actuales
+// Retorna un float entre 0 (choppy) y 1 (tendencia limpia)
+// -----------------------------------------------------------------------------
+calc_er(src, per) =>
+    // Desplazamiento neto: cuánto se movió el precio en 'per' velas
+    desplazamiento = math.abs(src - src[per])
+    // Ruido: suma de todos los movimientos vela a vela (camino recorrido)
+    ruido = math.sum(math.abs(src - src[1]), per)
+    // ER = movimiento neto / camino total (0 si no hay movimiento)
+    ruido != 0 ? desplazamiento / ruido : 0.0
+
+// -----------------------------------------------------------------------------
+// Cálculo ER en timeframe del chart (1m cuando el chart está en 1m)
+// -----------------------------------------------------------------------------
+er_1m = calc_er(close, length)
+
+// -----------------------------------------------------------------------------
+// Cálculo ER en timeframe superior (5m por defecto) via request.security
+// gaps=barmerge.gaps_off  → no deja huecos en las barras del chart
+// lookahead=off           → evita look-ahead bias (usa solo datos pasados)
+// -----------------------------------------------------------------------------
+er_5m = request.security(
+     syminfo.tickerid,
+     tf_alto,
+     calc_er(close, length),
+     gaps=barmerge.gaps_off,
+     lookahead=barmerge.lookahead_off
+     )
+
+// -----------------------------------------------------------------------------
+// Colores
+// -----------------------------------------------------------------------------
+
+// ER 1m: verde brillante si >= umbral, rojo si no
+col_1m = er_1m >= umbral
+     ? color.new(#00FF88, 0)   // Verde neon → tendencial
+     : color.new(#FF4444, 0)   // Rojo → choppy
+
+// ER 5m: azul claro si >= umbral, naranja si no
+col_5m = er_5m >= umbral
+     ? color.new(#00BFFF, 40)  // Azul celeste → contexto tendencial
+     : color.new(#FF8C00, 40)  // Naranja → contexto choppy
+
+// -----------------------------------------------------------------------------
+// Plots
+// -----------------------------------------------------------------------------
+
+// Línea principal: ER del timeframe del chart (1m)
+plot(er_1m, "ER 1m", color=col_1m, linewidth=2)
+
+// Línea punteada: ER del timeframe superior (5m)
+// Nota: el título debe ser const string — no se puede concatenar input variables
+plot(er_5m, "ER contexto (5m)", color=col_5m, linewidth=1,
+     style=plot.style_line)
+
+// Línea de umbral horizontal
+hline(umbral, "Umbral", color=color.new(color.white, 50),
+     linestyle=hline.style_dashed, linewidth=1)
+
+// Líneas de referencia 0 y 1
+hline(1.0, "Max", color=color.new(color.gray, 70), linewidth=1)
+hline(0.0, "Min", color=color.new(color.gray, 70), linewidth=1)
+
+// Fondo verde suave cuando ER 1m >= umbral (mercado tendencial en 1m)
+bgcolor(mostrar_fondo and er_1m >= umbral
+     ? color.new(#00FF88, 90)
+     : na,
+     title="Fondo tendencial")
+
+// -----------------------------------------------------------------------------
+// Señal A+ dual: ambos ER >= umbral → máxima convicción para entrar
+// Muestra un triángulo en el panel cuando se activa por primera vez
+// -----------------------------------------------------------------------------
+senal_dual = er_1m >= umbral and er_5m >= umbral
+plotshape(senal_dual and not senal_dual[1],
+     title="Señal A+ ER dual",
+     style=shape.triangleup,
+     location=location.bottom,
+     color=color.new(#00FF88, 0),
+     size=size.tiny,
+     text="A+")

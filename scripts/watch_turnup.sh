@@ -8,6 +8,10 @@
 #
 #   OFFSET  Binance - Capital (default 3.0), solo para mostrar precio Capital.
 #
+# Nota: este watcher NO usa USE_CAPITAL — su gatillo depende de RSI/EMA/momentum,
+#       que se calculan desde el OHLCV de Binance (Capital.com no entrega esos
+#       indicadores ni volumen). El OFFSET aquí es solo para mostrar el precio.
+#
 # Uso:  ./scripts/watch_turnup.sh
 
 NODE="$HOME/.local/share/fnm/aliases/default/bin/node"

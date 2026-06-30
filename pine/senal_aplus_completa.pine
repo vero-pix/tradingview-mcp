@@ -1,0 +1,297 @@
+//@version=5
+// =============================================================================
+// Señal A+ Completa — ETH Scalping 1m (Vero, Capital.com)
+// Autor: Vero + Claude, 2026-06-30 (rev. 2: sin repintado + VWAP auto + resistencias)
+//
+// Valida los filtros de la señal A+ usando SIEMPRE la última vela CERRADA
+// (no repinta: lo que ves es lo que fue, no parpadea intrabar).
+// El triángulo A+ aparece SOLO cuando todos los filtros obligatorios pasan.
+// La tabla muestra el estado verde/rojo de cada filtro para decidir rápido.
+//
+// Filtros ajustados por spread Capital.com (~$1,75):
+//   - RSI máximo 62 (antes 64)
+//   - Mom5 mínimo $1,75
+//   - No entrar a < $3 de una resistencia (filtro nuevo)
+// =============================================================================
+
+indicator("Señal A+ Completa", shorttitle="A+ ETH", overlay=false)
+
+// Este indicador está calibrado SOLO para velas de 1 minuto (mom5, volr, ER, RSI).
+// En otra temporalidad los números siguen apareciendo pero NO son válidos.
+es_1m = timeframe.period == "1"
+
+// -----------------------------------------------------------------------------
+// Parámetros configurables
+// -----------------------------------------------------------------------------
+
+// --- ER ---
+length_er  = input.int(10,   "Período ER",                minval=2,  group="ER Dual")
+umbral_er  = input.float(0.40, "Umbral ER (1m y 5m)",    step=0.05, group="ER Dual")
+tf_5m      = input.timeframe("5", "Timeframe contexto",             group="ER Dual")
+
+// --- Filtros señal A+ ---
+rsi_min    = input.float(50.0, "RSI mínimo",              step=1.0,  group="Filtros A+")
+rsi_max    = input.float(62.0, "RSI máximo (spread adj)", step=1.0,  group="Filtros A+")
+mom5_min   = input.float(1.75, "Mom5 mínimo ($)",         step=0.25, group="Filtros A+")
+volr_min   = input.float(1.20, "VolR mínimo",             step=0.05, group="Filtros A+")
+volabs_min = input.float(10.0, "VolAbs mínimo (mercado vivo)", step=1.0, group="Filtros A+")
+vwap_bloquea = input.bool(true, "VWAP bloquea la señal (precio debe estar sobre VWAP)", group="Filtros A+")
+
+// --- Resistencias (las pones tú, leídas de TU chart de Capital.com) ---
+// Deja en 0 las que no uses. El precio debe estar al menos 'dist_min' por debajo
+// de la resistencia más cercana ARRIBA, o el spread se come la ganancia.
+// Defaults = zonas vigentes en precio Capital.com (Binance −$3): 1604/1615/1628.
+// Actualízalas cuando el precio cambie de rango.
+res1     = input.float(1601.0, "Resistencia 1 ($)", group="Resistencias")
+res2     = input.float(1612.0, "Resistencia 2 ($)", group="Resistencias")
+res3     = input.float(1625.0, "Resistencia 3 ($)", group="Resistencias")
+dist_min = input.float(3.0, "Distancia mínima a resistencia ($)", step=0.5, group="Resistencias")
+resist_bloquea = input.bool(true, "Resistencia bloquea la señal", group="Resistencias")
+
+// --- Visual ---
+mostrar_tabla = input.bool(true, "Mostrar tabla de filtros", group="Visual")
+mostrar_fondo = input.bool(true, "Fondo verde ER 1m activo", group="Visual")
+
+// -----------------------------------------------------------------------------
+// Cálculo ER de Kaufman
+// Retorna float 0 (choppy) → 1 (tendencia limpia)
+// -----------------------------------------------------------------------------
+calc_er(src, per) =>
+    // Desplazamiento neto sobre 'per' velas
+    desplazamiento = math.abs(src - src[per])
+    // Ruido: suma de movimientos vela a vela
+    ruido = math.sum(math.abs(src - src[1]), per)
+    // ER = eficiencia del movimiento
+    ruido != 0 ? desplazamiento / ruido : 0.0
+
+// ER en timeframe del chart (1m)
+er_1m_raw = calc_er(close, length_er)
+
+// ER en timeframe superior (5m) via request.security
+// lookahead_off: evita look-ahead bias (no mira el futuro de la vela de 5m)
+er_5m_raw = request.security(
+     syminfo.tickerid, tf_5m,
+     calc_er(close, length_er),
+     gaps     = barmerge.gaps_off,
+     lookahead = barmerge.lookahead_off
+     )
+
+// -----------------------------------------------------------------------------
+// Indicadores base (se calculan sobre la vela viva; abajo tomamos su valor CERRADO)
+// -----------------------------------------------------------------------------
+e9_raw  = ta.ema(close, 9)
+e21_raw = ta.ema(close, 21)
+rsi_raw = ta.rsi(close, 14)
+vwap_raw = ta.vwap(hlc3)
+
+// =============================================================================
+// CLAVE ANTI-REPINTADO: todos los filtros leen la ÚLTIMA VELA CERRADA (offset [1]).
+// Así el triángulo y la alerta NO aparecen y desaparecen dentro de la vela viva.
+// El costo es que la señal llega al cerrar la vela (1 vela "tarde"), pero es real.
+// =============================================================================
+er_1m = er_1m_raw[1]
+er_5m = er_5m_raw[1]
+e9    = e9_raw[1]
+e21   = e21_raw[1]
+rsi   = rsi_raw[1]
+vwapv = vwap_raw[1]
+precio = close[1]                 // cierre de la última vela cerrada
+
+// Momentum de 5 velas, ya en barras cerradas (close[1] vs close[6])
+mom5 = close[1] - close[6]
+
+// Volumen: promedio de las 3 últimas velas cerradas vs promedio de 50
+vol3    = math.avg(volume[1], volume[2], volume[3])
+vol_avg = ta.sma(volume[1], 50)
+volr    = vol_avg > 0 ? vol3 / vol_avg : 0.0
+volabs  = vol3
+
+// -----------------------------------------------------------------------------
+// Resistencia más cercana POR ENCIMA del precio (ignora las que valen 0)
+// -----------------------------------------------------------------------------
+nearest_res = float(na)
+if res1 > 0 and res1 > precio
+    nearest_res := na(nearest_res) ? res1 : math.min(nearest_res, res1)
+if res2 > 0 and res2 > precio
+    nearest_res := na(nearest_res) ? res2 : math.min(nearest_res, res2)
+if res3 > 0 and res3 > precio
+    nearest_res := na(nearest_res) ? res3 : math.min(nearest_res, res3)
+dist_res = na(nearest_res) ? na : nearest_res - precio
+
+// -----------------------------------------------------------------------------
+// Evaluación de cada filtro A+ (true = pasa, false = falla)
+// -----------------------------------------------------------------------------
+
+// Filtro 1: mercado con actividad mínima (no madrugada muerta)
+f1_vivo = volabs >= volabs_min
+
+// Filtro 2: ER 1m tendencial (no choppy en la microestructura)
+f2_er1m = er_1m >= umbral_er
+
+// Filtro 3: ER 5m tendencial (contexto de mayor temporalidad)
+f3_er5m = er_5m >= umbral_er
+
+// Filtro 4: EMA9 sobre EMA21 (estructura alcista)
+f4_alcista = e9 > e21
+
+// Filtro 5: pullback a EMA9 en las 3 velas previas + rebote (cierre sobre EMA9)
+f5_pullback = (low[2] <= e9[2] or low[3] <= e9[3] or low[4] <= e9[4]) and precio > e9
+
+// Filtro 5b: momentum suficiente para cubrir el spread ($1,75)
+f6_mom5 = mom5 >= mom5_min
+
+// Filtro 6: RSI en rango óptimo (con fuerza pero sin sobrecompra)
+f7_rsi = rsi >= rsi_min and rsi <= rsi_max
+
+// Filtro 7: volumen del rebote sobre el promedio
+f8_volr = volr >= volr_min
+
+// Filtro 8: precio sobre su VWAP (ahora automático; antes lo confirmabas a ojo)
+f9_vwap = precio > vwapv
+
+// Filtro 9: lejos de resistencia (o no hay resistencia arriba)
+f10_resist = na(nearest_res) or dist_res >= dist_min
+
+// -----------------------------------------------------------------------------
+// Señal A+ completa: obligatorios siempre; VWAP y resistencia según switch
+// -----------------------------------------------------------------------------
+base_ok = f1_vivo and f2_er1m and f3_er5m and f4_alcista and
+     f5_pullback and f6_mom5 and f7_rsi and f8_volr
+
+senal_aplus = base_ok and
+     (not vwap_bloquea or f9_vwap) and
+     (not resist_bloquea or f10_resist)
+
+// Primera vela donde se activa (no repetir el triángulo)
+nueva_senal = senal_aplus and not senal_aplus[1]
+
+// -----------------------------------------------------------------------------
+// Colores del ER Dual
+// -----------------------------------------------------------------------------
+col_1m = er_1m >= umbral_er ? color.new(#00FF88, 0)  : color.new(#FF4444, 0)
+col_5m = er_5m >= umbral_er ? color.new(#00BFFF, 40) : color.new(#FF8C00, 40)
+
+// -----------------------------------------------------------------------------
+// Plots del panel ER
+// -----------------------------------------------------------------------------
+plot(er_1m, "ER 1m", color=col_1m, linewidth=2)
+plot(er_5m, "ER contexto (5m)", color=col_5m, linewidth=1)
+hline(umbral_er, "Umbral A+", color=color.new(color.white, 50),
+     linestyle=hline.style_dashed, linewidth=1)
+
+// Fondo verde suave cuando ER 1m está activo
+bgcolor(mostrar_fondo and er_1m >= umbral_er ? color.new(#00FF88, 92) : na,
+     title="Fondo ER 1m activo")
+
+// -----------------------------------------------------------------------------
+// Triángulo A+: aparece SOLO cuando todos los filtros pasan (vela cerrada)
+// -----------------------------------------------------------------------------
+plotshape(nueva_senal,
+     title    = "Señal A+ completa",
+     style    = shape.triangleup,
+     location = location.bottom,
+     color    = color.new(#00FF88, 0),
+     size     = size.normal,
+     text     = "A+",
+     display  = display.pane)
+
+// Alerta: solo en vela confirmada, para que no suene en falso intrabar
+alertcondition(nueva_senal, title="🔔 Señal A+ ETH",
+     message="⚡ ETH SEÑAL A+ — Revisa VWAP y ejecuta en Capital.com")
+
+// -----------------------------------------------------------------------------
+// Tabla de estado de filtros (esquina superior derecha)
+// Muestra el estado de la ÚLTIMA VELA CERRADA (coincide con lo que evalúa la señal)
+// -----------------------------------------------------------------------------
+var table tbl = table.new(
+     position     = position.top_right,
+     columns      = 2,
+     rows         = 12,
+     bgcolor      = color.new(color.black, 60),
+     border_color = color.new(color.gray, 60),
+     border_width = 1,
+     frame_color  = color.new(color.gray, 40),
+     frame_width  = 1)
+
+cell_bg(ok) => ok ? color.new(#00FF88, 30) : color.new(#FF3333, 30)
+cell_txt(ok, val) => ok ? "✅ " + val : "❌ " + val
+
+// Aviso: este indicador SOLO es válido en 1m (cartel rojo arriba al centro)
+var table aviso_tf = table.new(position.top_center, 1, 1,
+     bgcolor=color.new(#FF3333, 0), frame_color=color.white, frame_width=2)
+if barstate.islast
+    if not es_1m
+        table.cell(aviso_tf, 0, 0,
+             "⚠️ SOLO VÁLIDO EN 1m — estás en " + timeframe.period,
+             text_color=color.white, text_size=size.large)
+    else
+        table.cell(aviso_tf, 0, 0, "", bgcolor=color.new(color.black, 100))
+
+if mostrar_tabla and barstate.islast
+
+    // Encabezado
+    table.cell(tbl, 0, 0, "Filtro A+", text_color=color.white,
+         bgcolor=color.new(#1a1a3e, 20), text_size=size.small)
+    table.cell(tbl, 1, 0, "Estado", text_color=color.white,
+         bgcolor=color.new(#1a1a3e, 20), text_size=size.small)
+
+    // F1: Mercado vivo
+    table.cell(tbl, 0, 1, "1. Mercado vivo", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 1, cell_txt(f1_vivo, str.tostring(volabs, "0")),
+         bgcolor=cell_bg(f1_vivo), text_size=size.small)
+
+    // F2: ER 1m
+    table.cell(tbl, 0, 2, "2. ER 1m ≥ " + str.tostring(umbral_er, "0.00"),
+         text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 2, cell_txt(f2_er1m, str.tostring(er_1m, "0.00")),
+         bgcolor=cell_bg(f2_er1m), text_size=size.small)
+
+    // F3: ER 5m
+    table.cell(tbl, 0, 3, "3. ER 5m ≥ " + str.tostring(umbral_er, "0.00"),
+         text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 3, cell_txt(f3_er5m, str.tostring(er_5m, "0.00")),
+         bgcolor=cell_bg(f3_er5m), text_size=size.small)
+
+    // F4: EMA9 > EMA21
+    table.cell(tbl, 0, 4, "4. EMA9 > EMA21", text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 4, f4_alcista ? "✅ alcista" : "❌ bajista",
+         bgcolor=cell_bg(f4_alcista), text_size=size.small)
+
+    // F5: Pullback + Mom5
+    table.cell(tbl, 0, 5, "5. Pullback + Mom5 > " + str.tostring(mom5_min, "0.00"),
+         text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 5, cell_txt(f5_pullback and f6_mom5, str.tostring(mom5, "0.00")),
+         bgcolor=cell_bg(f5_pullback and f6_mom5), text_size=size.small)
+
+    // F6: RSI
+    table.cell(tbl, 0, 6, "6. RSI " + str.tostring(rsi_min, "0") + "–" + str.tostring(rsi_max, "0"),
+         text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 6, cell_txt(f7_rsi, str.tostring(rsi, "0.0")),
+         bgcolor=cell_bg(f7_rsi), text_size=size.small)
+
+    // F7: VolR
+    table.cell(tbl, 0, 7, "7. VolR ≥ " + str.tostring(volr_min, "0.00"),
+         text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 7, cell_txt(f8_volr, str.tostring(volr, "0.00")),
+         bgcolor=cell_bg(f8_volr), text_size=size.small)
+
+    // F8: VWAP (ahora automático)
+    vwap_lbl = vwap_bloquea ? "8. Precio > VWAP" : "8. VWAP (info)"
+    table.cell(tbl, 0, 8, vwap_lbl, text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 8, f9_vwap ? "✅ sobre" : "❌ bajo",
+         bgcolor=cell_bg(f9_vwap), text_size=size.small)
+
+    // F9: Resistencia
+    res_lbl = na(nearest_res) ? "sin R arriba" : "a $" + str.tostring(dist_res, "0.0")
+    table.cell(tbl, 0, 9, "9. Lejos de R (≥ $" + str.tostring(dist_min, "0.0") + ")",
+         text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, 9, cell_txt(f10_resist, res_lbl),
+         bgcolor=cell_bg(f10_resist), text_size=size.small)
+
+    // Resultado final
+    resultado_txt = senal_aplus ? "🟢 A+ VÁLIDA" : "🔴 ESPERAR"
+    resultado_col = senal_aplus ? color.new(#00FF88, 10) : color.new(#FF3333, 30)
+    table.cell(tbl, 0, 10, "→ SEÑAL", text_color=color.white,
+         bgcolor=resultado_col, text_size=size.small)
+    table.cell(tbl, 1, 10, resultado_txt, text_color=color.white,
+         bgcolor=resultado_col, text_size=size.small)
