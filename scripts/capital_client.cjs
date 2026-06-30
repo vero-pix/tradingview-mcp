@@ -255,8 +255,9 @@ async function getMarket(epic = "ETHUSD", { demo = false } = {}) {
     }
     if (res.status !== 200) throw new Error("GET /markets/" + epic + " falló: " + res.status);
 
-    const inst = res.data.instrument || {};
-    const snap = res.data.snapshot   || {};
+    const inst  = res.data.instrument   || {};
+    const snap  = res.data.snapshot     || {};
+    const rules = res.data.dealingRules || {};
     return {
         epic:           inst.epic || epic,
         instrumentName: inst.name,
@@ -266,6 +267,8 @@ async function getMarket(epic = "ETHUSD", { demo = false } = {}) {
                             ? +(snap.offer - snap.bid).toFixed(4) : null,
         updateTime:     snap.updateTime,
         marketStatus:   snap.marketStatus,
+        lotSize:        inst.lotSize,
+        minDealSize:    rules.minDealSize && rules.minDealSize.value,
     };
 }
 
@@ -358,12 +361,146 @@ async function getEthPosition({ demo = false, epic = "ETHUSD", account = "USD 2"
     return { positions, pnl };
 }
 
+// =============================================================================
+// ÓRDENES (escritura) — abrir / confirmar / cerrar
+//
+// ⚠️ Plata real. Esta capa es solo TRANSPORTE: valida lo básico, envía y confirma.
+//    Los guardrails de negocio (confirmación, anti-promedio, dry-run, registro en
+//    el diario, notificaciones) viven en el CLI capital_order.cjs, no aquí.
+//
+// Flujo Capital.com (asíncrono):
+//   POST /positions → {dealReference}  →  GET /confirms/{dealReference} → dealId/level
+// El dealReference NO garantiza ejecución; SIEMPRE hay que confirmar.
+// =============================================================================
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+/**
+ * Validación dura, última línea de defensa (independiente del CLI).
+ * Solo se soporta LONG (BUY) — Vero opera solo long.
+ * STOP SIEMPRE obligatorio. Stop debajo del precio, target (si hay) encima.
+ */
+function validateLongOrder({ offer, size, stopLevel, profitLevel, direction = "BUY" }) {
+    if (direction !== "BUY") {
+        throw new Error("Solo se permite direction BUY (Vero opera solo LONG).");
+    }
+    if (!(Number(size) > 0) || !isFinite(Number(size))) {
+        throw new Error("size inválido: " + size);
+    }
+    if (stopLevel == null || !isFinite(Number(stopLevel))) {
+        throw new Error("REGLA STOP SIEMPRE: no se permite abrir sin stopLevel.");
+    }
+    if (!(Number(stopLevel) < Number(offer))) {
+        throw new Error("stopLevel (" + stopLevel + ") debe ir POR DEBAJO del precio ask ("
+            + offer + ") para un LONG.");
+    }
+    if (profitLevel != null && !(Number(profitLevel) > Number(offer))) {
+        throw new Error("profitLevel (" + profitLevel + ") debe ir POR ENCIMA del precio ask ("
+            + offer + ") para un LONG.");
+    }
+}
+
+/**
+ * Consulta el resultado real de una orden asíncrona.
+ * Reintenta si el confirm aún no está disponible; nunca asume ACCEPTED.
+ * @returns {{dealStatus, dealId, level, reason, affectedDeals, raw}}
+ */
+async function confirmDeal(dealReference, { demo = false } = {}) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+        const res = await apiCall("GET", "/api/v1/confirms/" + encodeURIComponent(dealReference), { demo });
+        if (res.status === 200 && res.data) {
+            const d = res.data;
+            return {
+                dealStatus:    d.dealStatus,            // ACCEPTED / REJECTED
+                dealId:        d.dealId,
+                level:         d.level,
+                reason:        d.reason,
+                affectedDeals: d.affectedDeals || [],
+                raw:           d,
+            };
+        }
+        if (res.status === 404) { await sleep(300); continue; }   // aún no disponible
+        throw new Error("GET /confirms falló: " + res.status + " " + JSON.stringify(res.data));
+    }
+    return { dealStatus: "UNKNOWN", dealId: null, level: null,
+             reason: "confirm no disponible tras reintentos", affectedDeals: [], raw: null };
+}
+
+/**
+ * Abre una posición LONG. Valida → POST /positions → confirma.
+ * @returns {{ok, dealReference, dealStatus, dealId, level, reason, raw}}
+ */
+async function openPosition({ epic = "ETHUSD", direction = "BUY", size, stopLevel,
+                              profitLevel = null, offer, guaranteedStop = false, demo = false } = {}) {
+    // Validación dura. El llamador debe pasar el offer real (precio ask) para
+    // verificar que stop va por debajo y target por encima.
+    if (offer == null || !isFinite(Number(offer))) {
+        throw new Error("openPosition: falta el offer (precio ask) para validar la orden.");
+    }
+    validateLongOrder({ offer, size, stopLevel, profitLevel, direction });
+
+    const body = { epic, direction, size: Number(size), stopLevel: Number(stopLevel), guaranteedStop };
+    if (profitLevel != null) body.profitLevel = Number(profitLevel);
+
+    const res = await apiCall("POST", "/api/v1/positions", { demo, body });
+    if (isLockError(res)) {
+        throw new Error("Apertura rechazada por rate limit/bloqueo. errorCode="
+            + (res.data && res.data.errorCode));
+    }
+    if (res.status !== 200 || !res.data || !res.data.dealReference) {
+        throw new Error("POST /positions falló (status " + res.status + "): " + JSON.stringify(res.data));
+    }
+    const dealReference = res.data.dealReference;
+    await sleep(250);                          // dar tiempo al confirm
+    const conf = await confirmDeal(dealReference, { demo });
+    return {
+        ok:            conf.dealStatus === "ACCEPTED",
+        dealReference,
+        dealStatus:    conf.dealStatus,
+        dealId:        conf.dealId,
+        level:         conf.level,
+        reason:        conf.reason,
+        raw:           conf.raw,
+    };
+}
+
+/**
+ * Cierra una posición por su dealId (NO dealReference). Cierre total.
+ * @returns {{ok, dealReference, dealStatus, dealId, level, reason, raw}}
+ */
+async function closePosition(dealId, { demo = false } = {}) {
+    if (!dealId || typeof dealId !== "string") {
+        throw new Error("falta dealId válido (no usar dealReference para cerrar).");
+    }
+    const res = await apiCall("DELETE", "/api/v1/positions/" + encodeURIComponent(dealId), { demo });
+    if (isLockError(res)) {
+        throw new Error("Cierre rechazado por rate limit/bloqueo. errorCode="
+            + (res.data && res.data.errorCode));
+    }
+    if (res.status !== 200 || !res.data || !res.data.dealReference) {
+        throw new Error("DELETE /positions falló (status " + res.status + "): " + JSON.stringify(res.data));
+    }
+    const dealReference = res.data.dealReference;
+    await sleep(250);
+    const conf = await confirmDeal(dealReference, { demo });
+    return {
+        ok:            conf.dealStatus === "ACCEPTED",
+        dealReference,
+        dealStatus:    conf.dealStatus,
+        dealId:        conf.dealId || dealId,
+        level:         conf.level,
+        reason:        conf.reason,
+        raw:           conf.raw,
+    };
+}
+
 module.exports = {
     HOST_LIVE, HOST_DEMO, SESSION_FILE,
-    loadEnv, getConfig, request,
+    loadEnv, getConfig, request, sleep,
     loadSession, saveSession, clearSession,
     authenticate, apiCall,
     getAccounts, selectAccount,
     getMarket, getPrice,
     getPositions, computePnL, getEthPosition,
+    validateLongOrder, openPosition, confirmDeal, closePosition,
 };
