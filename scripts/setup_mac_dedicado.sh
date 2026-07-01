@@ -64,8 +64,11 @@ PLIST
 # --- Bot de Telegram ---
 cp "$REPO/scripts/cl.vero.telegrambot.plist" "$LA/cl.vero.telegrambot.plist"
 
-# --- Cargar los tres servicios ---
-for L in cl.vero.detectoreth cl.vero.detectorbtc cl.vero.telegrambot; do
+# --- Guardián de stop (red de protección: pone stop a posiciones naked) ---
+cp "$REPO/scripts/cl.vero.stopguard.plist" "$LA/cl.vero.stopguard.plist"
+
+# --- Cargar los servicios ---
+for L in cl.vero.detectoreth cl.vero.detectorbtc cl.vero.telegrambot cl.vero.stopguard; do
   launchctl unload "$LA/$L.plist" 2>/dev/null || true
   launchctl load "$LA/$L.plist"
   echo "✅ cargado $L"
@@ -78,4 +81,5 @@ echo ""
 echo "⚠️ RECUERDA: en tu Mac PRINCIPAL, apaga el bot y los detectores para que no choquen:"
 echo "   launchctl unload ~/Library/LaunchAgents/cl.vero.detectoreth.plist"
 echo "   launchctl unload ~/Library/LaunchAgents/cl.vero.detectorbtc.plist"
+echo "   launchctl unload ~/Library/LaunchAgents/cl.vero.stopguard.plist"
 echo "   pkill -f telegram_confirm_bot"
