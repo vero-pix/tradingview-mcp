@@ -184,16 +184,22 @@ bgcolor(mostrar_fondo and er_1m >= umbral_er ? color.new(#00FF88, 92) : na,
      title="Fondo ER 1m activo")
 
 // -----------------------------------------------------------------------------
-// Triángulo A+: aparece SOLO cuando todos los filtros pasan (vela cerrada)
+// Señal A+: MUY visible cuando todos los filtros pasan (vela cerrada)
+//   - triángulo grande con texto "COMPRA A+"
+//   - la vela de la señal se pinta de verde brillante para que salte a la vista
 // -----------------------------------------------------------------------------
 plotshape(nueva_senal,
      title    = "Señal A+ completa",
      style    = shape.triangleup,
      location = location.bottom,
      color    = color.new(#00FF88, 0),
-     size     = size.normal,
-     text     = "A+",
+     textcolor= color.new(#00FF88, 0),
+     size     = size.large,
+     text     = "COMPRA\nA+",
      display  = display.pane)
+
+// Vela de la señal pintada de verde brillante (imposible de perder)
+bgcolor(nueva_senal ? color.new(#00FF88, 35) : na, title="Vela señal A+")
 
 // Alerta: solo en vela confirmada, para que no suene en falso intrabar
 alertcondition(nueva_senal, title="🔔 Señal A+ ETH",
