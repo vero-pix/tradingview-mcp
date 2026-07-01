@@ -59,10 +59,15 @@ while true; do
   if [ "$DIR_OK" = "0" ]; then echo "$(date '+%H:%M:%S') choppy ER=$ER"; pb=0; sleep 6; continue; fi
   TREND=$("$NODE" -e "console.log(($E9-$E21)>=0.4?1:0)")
   if [ "$TREND" = "0" ]; then echo "$(date '+%H:%M:%S') EMAs planas ER=$ER"; pb=0; sleep 6; continue; fi
+  # CONTEXTO 5m (igual que el indicador filtro 3): el marco de 5m también debe ser
+  # tendencial (ER 5m >= 0.40). Solo se consulta acá, cuando el 1m ya viene bien.
+  ER5=$(BINANCE_INTERVAL=5m BINANCE_LIMIT=100 "$NODE" scripts/ohlcv_binance.js 2>/dev/null | "$NODE" scripts/calc_indicators.js | cut -d'|' -f7)
+  CTX5=$("$NODE" -e "console.log(($ER5>=0.40)?1:0)")
+  if [ "$CTX5" = "0" ]; then echo "$(date '+%H:%M:%S') contexto 5m débil (ER5=$ER5)"; pb=0; sleep 6; continue; fi
   NEAR=$("$NODE" -e "console.log(($P-$E9)<=0.8?1:0)")
   [ "$NEAR" = "1" ] && pb=1
   # filtro de VOLUMEN: el rebote debe venir con volumen sobre lo normal (volr>=1.2)
-  REB=$("$NODE" -e "console.log(($pb==1 && $M2>=1.0 && $P>=$E9 && $R>=50 && $R<=64 && $M5>=1.0 && $VR>=1.2)?1:0)")
+  REB=$("$NODE" -e "console.log(($pb==1 && $M2>=1.0 && $P>=$E9 && $R>=50 && $R<=62 && $M5>=1.75 && $VR>=1.2)?1:0)")
 
   if [ "$REB" = "1" ] && [ "$cooldown" -eq 0 ]; then
     # Stop = entrada − 2×ATR (volatilidad real). Objetivo = entrada + 2×ATR (RR 1:1, scalp).
