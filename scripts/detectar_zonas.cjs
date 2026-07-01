@@ -37,10 +37,12 @@ const WINDOW = Number(flag("--window", "4"));      // velas a cada lado para un 
 const TOL    = Number(flag("--tol", "0.25")) / 100; // tolerancia de agrupación (%)
 const NRES   = Number(flag("--res", "3"));          // nº de resistencias a proponer
 const NSUP   = Number(flag("--sup", "3"));          // nº de soportes a proponer
+const SYMBOL = flag("--symbol", "ETHUSDT");         // símbolo Binance (BTCUSDT para BTC)
+const OUT    = flag("--out", ZONAS_FILE);           // archivo de salida (default zonas.env)
 
 function fetchBars() {
     const out = execFileSync("bash", ["-c",
-        `BINANCE_INTERVAL=${TF} BINANCE_LIMIT=${LIMIT} "${NODE}" scripts/ohlcv_binance.js`],
+        `BINANCE_SYMBOL=${SYMBOL} BINANCE_INTERVAL=${TF} BINANCE_LIMIT=${LIMIT} "${NODE}" scripts/ohlcv_binance.js`],
         { cwd: DIR, encoding: "utf8" });
     const bars = JSON.parse(out).bars || [];
     if (bars.length < WINDOW * 2 + 5) throw new Error("pocas velas de Binance (" + bars.length + ")");
@@ -113,11 +115,11 @@ function main() {
 
     // Backup + escritura
     const stamp = new Date().toISOString().slice(0, 16).replace(/[-T:]/g, "").slice(0, 12);
-    const backup = path.join(DIR, "scripts", `zonas_backup_${stamp}.env`);
-    try { fs.copyFileSync(ZONAS_FILE, backup); } catch (e) {}
+    const backup = OUT + `.backup_${stamp}`;
+    try { fs.copyFileSync(OUT, backup); } catch (e) {}
     const nowStr = new Date().toISOString().slice(0, 10);
     const lines = [
-        `# Zonas ETH — autodetectadas ${nowStr} (Binance ${TF}, precio ~${price.toFixed(0)})`,
+        `# Zonas ${SYMBOL} — autodetectadas ${nowStr} (Binance ${TF}, precio ~${price.toFixed(0)})`,
         `# Generado por scripts/detectar_zonas.cjs. REVISA antes de confiar — ajusta a mano si hace falta.`,
         `# Backup del anterior: ${path.basename(backup)}`,
         "",
@@ -127,8 +129,8 @@ function main() {
         lines.push(`#   ${c.price.toFixed(1)}  ${tipo} (${c.touches} toques)`);
     }
     lines.push("", `export ZONAS="${csv}"`, "");
-    fs.writeFileSync(ZONAS_FILE, lines.join("\n"));
-    console.log(`✅ zonas.env actualizado. Backup: ${path.basename(backup)}\n`);
+    fs.writeFileSync(OUT, lines.join("\n"));
+    console.log(`✅ ${path.basename(OUT)} actualizado. Backup: ${path.basename(backup)}\n`);
 }
 
 try { main(); } catch (e) { console.error("detectar_zonas: " + e.message); process.exit(1); }

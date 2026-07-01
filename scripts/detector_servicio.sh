@@ -20,11 +20,22 @@ ZONE_ALERTS="${ZONE_ALERTS:-1}"       # 1 = avisar al tocar zonas; 0 = desactiva
 ZONE_THRESH="${ZONE_THRESH:-0.0015}"  # proximidad: 0.15% del precio (~$2.5 en ETH)
 ZONES_STATE="{}"                       # estado previo por nivel (para detectar cruces)
 
+# --- Multi-instrumento: configurable por env (default ETH). Para BTC:
+#     BINANCE_SYMBOL=BTCUSDT EPIC=BTCUSD ZONAS_FILE=scripts/zonas_BTCUSD.env LIQ_MIN=8 ---
+SYMBOL="${BINANCE_SYMBOL:-ETHUSDT}"          # símbolo Binance
+EPIC="${EPIC:-ETHUSD}"                        # epic Capital (para el bot)
+ZONAS_FILE="${ZONAS_FILE:-scripts/zonas.env}"
+LIQ_MIN="${LIQ_MIN:-50}"                      # volumen absoluto mínimo (asset-específico)
+# Umbrales en % del precio (mismos %s sirven para ETH ~1580 y BTC ~60000):
+TREND_PCT="${TREND_PCT:-0.025}"               # EMA9-EMA21 >= 0.025% del precio (≈0.4 en ETH)
+PULLBACK_PCT="${PULLBACK_PCT:-0.05}"          # P-EMA9 <= 0.05% del precio (≈0.8 en ETH)
+MOM5_PCT="${MOM5_PCT:-0.11}"                  # mom5 >= 0.11% del precio (≈1.75 en ETH)
+
 while true; do
   # Datos desde Binance (volumen REAL). El feed de Capital.com en TV no entrega
   # volumen (siempre 1); ver scripts/ohlcv_binance.js. Vero sigue OPERANDO en
   # Capital.com — solo la DETECCIÓN de la señal usa datos de Binance.
-  VAL=$("$NODE" scripts/ohlcv_binance.js 2>/dev/null | "$NODE" scripts/calc_indicators.js)
+  VAL=$(BINANCE_SYMBOL="$SYMBOL" "$NODE" scripts/ohlcv_binance.js 2>/dev/null | "$NODE" scripts/calc_indicators.js)
   P=$(echo "$VAL"|cut -d'|' -f1); E9=$(echo "$VAL"|cut -d'|' -f2); E21=$(echo "$VAL"|cut -d'|' -f3)
   R=$(echo "$VAL"|cut -d'|' -f4); M5=$(echo "$VAL"|cut -d'|' -f5); M2=$(echo "$VAL"|cut -d'|' -f6); ER=$(echo "$VAL"|cut -d'|' -f7); VR=$(echo "$VAL"|cut -d'|' -f8); VA=$(echo "$VAL"|cut -d'|' -f9); AT=$(echo "$VAL"|cut -d'|' -f10)
 
@@ -35,7 +46,7 @@ while true; do
   # --- ZONAS: avisa al ACERCARSE o ROMPER tus niveles. Corre SIEMPRE, antes
   #     de los filtros, así te enteras aunque el mercado esté choppy/muerto. ---
   if [ "$ZONE_ALERTS" = "1" ]; then
-    ZONAS=$(grep -E '^export ZONAS=' scripts/zonas.env 2>/dev/null | sed 's/.*="//; s/".*//')
+    ZONAS=$(grep -E '^export ZONAS=' "$ZONAS_FILE" 2>/dev/null | sed 's/.*="//; s/".*//')
     if [ -n "$ZONAS" ]; then
       ZRES=$(PRICE="$P" LEVELS="$ZONAS" PREV="$ZONES_STATE" THRESH="$ZONE_THRESH" "$NODE" scripts/level_alert.js 2>/dev/null)
       NEWZ=$(echo "$ZRES" | "$NODE" -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.stringify(JSON.parse(s).state))}catch(e){console.log('')}})")
@@ -52,22 +63,22 @@ while true; do
 
   # FILTRO LIQUIDEZ: si el volumen absoluto es ridículo (<50), mercado muerto
   # sin liquidez (madrugada) -> movimientos fantasma, NO operar.
-  LIQ=$("$NODE" -e "console.log($VA>=50?1:0)")
+  LIQ=$("$NODE" -e "console.log($VA>=$LIQ_MIN?1:0)")
   if [ "$LIQ" = "0" ]; then echo "$(date '+%H:%M:%S') mercado muerto sin liquidez (vol=$VA)"; pb=0; sleep 6; continue; fi
 
   DIR_OK=$("$NODE" -e "console.log($ER>=0.40?1:0)")
   if [ "$DIR_OK" = "0" ]; then echo "$(date '+%H:%M:%S') choppy ER=$ER"; pb=0; sleep 6; continue; fi
-  TREND=$("$NODE" -e "console.log(($E9-$E21)>=0.4?1:0)")
+  TREND=$("$NODE" -e "console.log(($E9-$E21)>=($P*$TREND_PCT/100)?1:0)")
   if [ "$TREND" = "0" ]; then echo "$(date '+%H:%M:%S') EMAs planas ER=$ER"; pb=0; sleep 6; continue; fi
   # CONTEXTO 5m (igual que el indicador filtro 3): el marco de 5m también debe ser
   # tendencial (ER 5m >= 0.40). Solo se consulta acá, cuando el 1m ya viene bien.
-  ER5=$(BINANCE_INTERVAL=5m BINANCE_LIMIT=100 "$NODE" scripts/ohlcv_binance.js 2>/dev/null | "$NODE" scripts/calc_indicators.js | cut -d'|' -f7)
+  ER5=$(BINANCE_SYMBOL="$SYMBOL" BINANCE_INTERVAL=5m BINANCE_LIMIT=100 "$NODE" scripts/ohlcv_binance.js 2>/dev/null | "$NODE" scripts/calc_indicators.js | cut -d'|' -f7)
   CTX5=$("$NODE" -e "console.log(($ER5>=0.40)?1:0)")
   if [ "$CTX5" = "0" ]; then echo "$(date '+%H:%M:%S') contexto 5m débil (ER5=$ER5)"; pb=0; sleep 6; continue; fi
-  NEAR=$("$NODE" -e "console.log(($P-$E9)<=0.8?1:0)")
+  NEAR=$("$NODE" -e "console.log(($P-$E9)<=($P*$PULLBACK_PCT/100)?1:0)")
   [ "$NEAR" = "1" ] && pb=1
   # filtro de VOLUMEN: el rebote debe venir con volumen sobre lo normal (volr>=1.2)
-  REB=$("$NODE" -e "console.log(($pb==1 && $M2>=1.0 && $P>=$E9 && $R>=50 && $R<=62 && $M5>=1.75 && $VR>=1.2)?1:0)")
+  REB=$("$NODE" -e "console.log(($pb==1 && $M2>=1.0 && $P>=$E9 && $R>=50 && $R<=62 && $M5>=($P*$MOM5_PCT/100) && $VR>=1.2)?1:0)")
 
   if [ "$REB" = "1" ] && [ "$cooldown" -eq 0 ]; then
     # Stop = entrada − 2×ATR (volatilidad real). Objetivo = entrada + 2×ATR (RR 1:1, scalp).
@@ -89,8 +100,8 @@ while true; do
       CAP_ENTRY=$("$NODE" -e "console.log(($P-$OFF).toFixed(2))")
       CAP_SL=$("$NODE"    -e "console.log(($SL-$OFF).toFixed(2))")
       CAP_TP=$("$NODE"    -e "console.log(($TP-$OFF).toFixed(2))")
-      printf '{"id":"sig%s","ts":%s,"epic":"ETHUSD","entry":%s,"stop":%s,"tp":%s}\n' \
-        "$SIG_TS" "$SIG_TS" "$CAP_ENTRY" "$CAP_SL" "$CAP_TP" > /tmp/vero_pending_order.json
+      printf '{"id":"sig%s","ts":%s,"epic":"%s","entry":%s,"stop":%s,"tp":%s}\n' \
+        "$SIG_TS" "$SIG_TS" "$EPIC" "$CAP_ENTRY" "$CAP_SL" "$CAP_TP" > "/tmp/vero_pending_${EPIC}.json"
     fi
     cooldown=50   # ~5 min de silencio tras avisar
     pb=0

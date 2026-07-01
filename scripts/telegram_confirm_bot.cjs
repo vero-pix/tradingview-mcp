@@ -27,7 +27,14 @@ const capital = require("./capital_client.cjs");
 
 const HOME = process.env.HOME;
 const DIR  = path.join(HOME, "Trading", "tradingview-mcp");
-const PENDING_FILE = path.join(os.tmpdir(), "vero_pending_order.json");
+// El detector escribe los pendings en /tmp (literal) — el bot los busca ahí mismo.
+// Un archivo por instrumento: /tmp/vero_pending_<EPIC>.json (más el legacy _order).
+const PENDING_DIR = "/tmp";
+function pendingFiles() {
+    try { return fs.readdirSync(PENDING_DIR)
+        .filter(f => /^vero_pending_.+\.json$/.test(f))
+        .map(f => path.join(PENDING_DIR, f)); } catch (e) { return []; }
+}
 const NODE = (() => {
     const p = path.join(HOME, ".local/share/fnm/aliases/default/bin/node");
     try { fs.accessSync(p, fs.constants.X_OK); return p; } catch (e) { return process.execPath; }
@@ -78,8 +85,8 @@ async function sendButtons(id, text) {
 // Ejecuta la compra reusando capital_order.cjs buy (todos los guardrails y el
 // bracket real en precio Capital). Devuelve {ok, msg}.
 // -----------------------------------------------------------------------------
-function ejecutarCompra() {
-    const args = ["scripts/capital_order.cjs", "buy", "--size", String(SIZE), "--epic", EPIC];
+function ejecutarCompra(epic) {
+    const args = ["scripts/capital_order.cjs", "buy", "--size", String(SIZE), "--epic", epic || EPIC];
     if (MODE === "DEMO") args.push("--demo", "--live", "--yes");
     else if (MODE === "LIVE") args.push("--live", "--yes");
     // DRY-RUN: sin --live → capital_order imprime lo que haría, no opera
@@ -98,15 +105,21 @@ function ejecutarCompra() {
 // -----------------------------------------------------------------------------
 // Estado de la señal pendiente
 // -----------------------------------------------------------------------------
-let pending = null;   // {id, ts, entry, msgId}
-const enviados = new Set();   // ids ya mandados (no re-enviar)
+const pendings = new Map();    // id → {id, ts, entry, epic, msgId} (varias señales a la vez)
+const enviados = new Set();    // ids ya mandados (no re-enviar)
 
-// Revisa el archivo pending; si hay una señal NUEVA, manda los botones.
+// Revisa los archivos pending (uno por instrumento); si hay una señal NUEVA, manda botones.
 async function revisarPending() {
-    let data;
-    try { data = JSON.parse(fs.readFileSync(PENDING_FILE, "utf8")); } catch (e) { return; }
+    for (const file of pendingFiles()) {
+        try { await procesarPending(JSON.parse(fs.readFileSync(file, "utf8"))); } catch (e) {}
+    }
+}
+async function procesarPending(data) {
     if (!data || !data.id) return;
     if (enviados.has(data.id)) return;                       // ya la mandamos, no repetir
+    // No mandar señales viejas (ej. pending que quedó de antes): solo dentro de la ventana
+    const edad = Date.now() - (data.ts || 0);
+    if (edad > WINDOW_MS) { enviados.add(data.id); return; }
 
     const entry = Number(data.entry);
     const stopHint = data.stop ? ` · stop ~${data.stop}` : "";
@@ -116,7 +129,7 @@ async function revisarPending() {
         + `Ventana: ${Math.round(WINDOW_MS / 60000)} min. ¿Confirmas la compra?`;
     const r = await sendButtons(data.id, txt);
     enviados.add(data.id);
-    pending = { id: data.id, ts: data.ts || Date.now(), entry, msgId: r.result && r.result.message_id };
+    pendings.set(data.id, { id: data.id, ts: data.ts || Date.now(), entry, epic: data.epic || EPIC, msgId: r.result && r.result.message_id });
     console.log(`${ts()} 📨 señal ${data.id} enviada a Telegram (entrada ~${entry})`);
 }
 
@@ -144,7 +157,7 @@ async function poll() {
             await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Cancelado ❌" });
             await tg("editMessageText", { chat_id: CHAT, message_id: cq.message.message_id, text: cq.message.text + "\n\n❌ CANCELADO por ti." });
             console.log(`${ts()} ❌ PASO (id ${id})`);
-            if (pending && pending.id === id) pending = null;
+            pendings.delete(id);
             continue;
         }
         if (action !== "buy") continue;
@@ -152,28 +165,32 @@ async function poll() {
         await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Verificando..." });
         console.log(`${ts()} ✅ COMPRAR (id ${id}) — modo ${MODE}`);
 
+        const pend = pendings.get(id);
         let res;
         if (test) {
-            res = ejecutarCompra();   // en test igual ejecuta (dry-run si no hay --live)
-        } else if (!pending || pending.id !== id) {
+            res = ejecutarCompra(EPIC);   // en test igual ejecuta (dry-run si no hay --live)
+        } else if (!pend) {
             res = { ok: false, msg: "Señal ya no está activa." };
-        } else if (Date.now() - pending.ts > WINDOW_MS) {
+        } else if (Date.now() - pend.ts > WINDOW_MS) {
             res = { ok: false, msg: `Caducó (pasaron más de ${Math.round(WINDOW_MS/60000)} min).` };
         } else {
-            // no perseguir: el precio no debe haberse ido > MAX_CHASE sobre la entrada de la señal
+            // no perseguir: el precio no debe haberse ido > MAX_CHASE sobre la entrada de la señal.
+            // MAX_CHASE se escala al instrumento (BTC ~$60k no puede usar $2 fijo).
             try {
-                const mkt = await capital.getMarket(EPIC, { demo: MODE === "DEMO" });
-                if (mkt.offer > pending.entry + MAX_CHASE) {
-                    res = { ok: false, msg: `Ya se fue (${mkt.offer} > entrada+$${MAX_CHASE}). No persigo.` };
+                const pending = pend;
+                const mkt = await capital.getMarket(pending.epic, { demo: MODE === "DEMO" });
+                const chaseLimit = Math.max(MAX_CHASE, pending.entry * 0.0013);   // ~0.13% del precio
+                if (mkt.offer > pending.entry + chaseLimit) {
+                    res = { ok: false, msg: `Ya se fue (${mkt.offer} > entrada+${chaseLimit.toFixed(2)}). No persigo.` };
                 } else {
-                    res = ejecutarCompra();
+                    res = ejecutarCompra(pending.epic);
                 }
             } catch (e) { res = { ok: false, msg: "Error validando precio: " + e.message }; }
         }
         await tg("editMessageText", { chat_id: CHAT, message_id: cq.message.message_id,
             text: cq.message.text + "\n\n" + (res.ok ? "✅ " : "⚠️ ") + res.msg });
         console.log(`${ts()}   → ${res.msg}`);
-        if (pending && pending.id === id) pending = null;
+        pendings.delete(id);
     }
 }
 
