@@ -74,6 +74,14 @@ while true; do
     MAX_ENTRY=$("$NODE" -e "console.log(($P+2).toFixed(2))")
     echo "$(date '+%H:%M:%S') >>> ENTRADA p=$P rsi=$R ER=$ER vol=$VR sl=$SL tp=$TP maxEntry=$MAX_ENTRY"
     ./scripts/notify.sh "SEÑAL LONG · ETH $P · Vero" "✅ ENTRADA $P | 🛑 STOP $SL | 🎯 OBJETIVO $TP (riesgo \$$RISK). DIRECCIONAL (ER=$ER) + VOLUMEN ${VR}x, RSI $R. Confirma VWAP. Si pierde el STOP, SAL. NO promedies. ⏰ CADUCA si precio > \$$MAX_ENTRY (no perseguir)." "Hero"
+    # Armar orden (opcional, default OFF): incluye el comando de compra listo para
+    # que Vero solo lo confirme. Se activa con ARM_ORDER=1 en el entorno del servicio.
+    # NO ejecuta nada: solo propone. El size sugerido es ARM_SIZE (default 0.001).
+    if [ "${ARM_ORDER:-0}" = "1" ]; then
+      CMD="cd ~/Trading/tradingview-mcp && node scripts/capital_order.cjs buy --size ${ARM_SIZE:-0.001} --live"
+      echo "$CMD" > /tmp/vero_armed_order.txt
+      ./scripts/notify.sh "🔫 Orden A+ lista para confirmar" "Pega en tu terminal y escribe CONFIRMO (o quita --live para simular): $CMD" "Glass"
+    fi
     cooldown=50   # ~5 min de silencio tras avisar
     pb=0
   else
