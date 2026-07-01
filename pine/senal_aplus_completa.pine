@@ -40,11 +40,11 @@ vwap_bloquea = input.bool(true, "VWAP bloquea la señal (precio debe estar sobre
 // --- Resistencias (las pones tú, leídas de TU chart de Capital.com) ---
 // Deja en 0 las que no uses. El precio debe estar al menos 'dist_min' por debajo
 // de la resistencia más cercana ARRIBA, o el spread se come la ganancia.
-// Defaults = zonas vigentes en precio Capital.com (Binance −$3): 1604/1615/1628.
-// Actualízalas cuando el precio cambie de rango.
-res1     = input.float(1601.0, "Resistencia 1 ($)", group="Resistencias")
-res2     = input.float(1612.0, "Resistencia 2 ($)", group="Resistencias")
-res3     = input.float(1625.0, "Resistencia 3 ($)", group="Resistencias")
+// Defaults = zonas autodetectadas 2026-07-01 en precio Capital.com (Binance −~3):
+// 1575 (techo fuerte, 9 toques), 1580, 1585. Actualízalas cuando cambie el rango.
+res1     = input.float(1575.0, "Resistencia 1 ($)", group="Resistencias")
+res2     = input.float(1580.0, "Resistencia 2 ($)", group="Resistencias")
+res3     = input.float(1585.0, "Resistencia 3 ($)", group="Resistencias")
 dist_min = input.float(3.0, "Distancia mínima a resistencia ($)", step=0.5, group="Resistencias")
 resist_bloquea = input.bool(true, "Resistencia bloquea la señal", group="Resistencias")
 
