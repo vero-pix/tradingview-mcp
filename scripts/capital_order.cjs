@@ -50,6 +50,7 @@ const demo    = argv.includes("--demo");
 const live    = argv.includes("--live");
 const yes     = argv.includes("--yes");
 const forcePromedio = argv.includes("--force-promedio");
+const noTarget = argv.includes("--no-target");
 function flag(name, def = null) { const i = argv.indexOf(name); return i !== -1 ? argv[i + 1] : def; }
 const account = flag("--account", "USD 2");
 const epic    = flag("--epic", "ETHUSD");
@@ -86,6 +87,16 @@ function nearestResistance(price) {
         const above = m[1].split(",").map(Number).filter(x => x > price).sort((a, b) => a - b);
         return above.length ? above[0] : null;
     } catch (e) { return null; }
+}
+
+// Todas las resistencias por encima del precio (ascendente), de zonas.env.
+function resistancesAbove(price) {
+    try {
+        const txt = fs.readFileSync(path.join(DIR, "scripts", "zonas.env"), "utf8");
+        const m = txt.match(/^export ZONAS="([^"]+)"/m);
+        if (!m) return [];
+        return m[1].split(",").map(Number).filter(x => x > price).sort((a, b) => a - b);
+    } catch (e) { return []; }
 }
 
 // Soporte más cercano por debajo del precio (de zonas.env). Nota: las zonas están
@@ -186,12 +197,38 @@ async function cmdBuy() {
         }
         stop = +(offer - dist).toFixed(2);
     }
-    if (target == null) target = +(offer + (offer - stop)).toFixed(2);   // RR 1:1
+    // Target inteligente: por defecto apunta JUSTO ANTES de la próxima resistencia
+    // (donde el precio tiende a devolverse), no un RR 1:1 fijo que corta ganadores.
+    //   --no-target  → deja la posición sin TP (salida manual en sobrecompra RSI 75-80)
+    //   --target X   → precio explícito
+    // Si no hay resistencia útil arriba, cae a RR 1:1 como piso.
+    const res = nearestResistance(offer);   // en precio Binance (~$3 sobre Capital)
+    let targetNota = "";
+    if (noTarget) {
+        target = null;
+        targetNota = "manual (sin TP)";
+    } else if (target != null) {
+        targetNota = "manual";
+    } else {
+        const rr1 = +(offer + (offer - stop)).toFixed(2);
+        // Primera resistencia que deje un target ÚTIL tras el buffer (ignora las
+        // pegadas al precio). El buffer absorbe el offset Binance→Capital y hace
+        // que salga justo antes del techo.
+        const useful = resistancesAbove(offer)
+            .map(r => ({ r, cand: +(r - RESIST_BUFFER).toFixed(2) }))
+            .find(x => x.cand > offer + (offer - stop) * 0.8);
+        if (useful) {
+            target = useful.cand;
+            targetNota = `antes de resistencia ${useful.r}`;
+        } else {
+            target = rr1;                        // piso RR 1:1
+            targetNota = "RR 1:1";
+        }
+    }
 
     const contractSize = 1; // ETH cripto: 1; el size ya está en unidades
     const riesgoUSD   = (offer - stop) * size * contractSize;
     const gananciaUSD = target != null ? (target - offer) * size * contractSize : null;
-    const res = nearestResistance(offer);
     const rsi = ind ? ind.rsi : null;
 
     // ---- guardrails ----
@@ -216,7 +253,7 @@ async function cmdBuy() {
     console.log(`  Precio ask:    ${offer}   (bid ${bid}, spread ${mkt.spread})`);
     console.log(`  Size:          ${size}`);
     console.log(`  Stop:          ${stop}   (${stopNota ? stopNota + ", " : ""}−$${(offer - stop).toFixed(2)}, riesgo ${fmt(-Math.abs(riesgoUSD))} USD)`);
-    console.log(`  Target:        ${target != null ? target + "   (ganancia " + fmt(gananciaUSD) + " USD)" : "(sin target)"}`);
+    console.log(`  Target:        ${target != null ? target + "   (" + targetNota + ", ganancia " + fmt(gananciaUSD) + " USD)" : "(sin TP — salida manual en sobrecompra)"}`);
     console.log(`  Resistencia +: ${res != null ? res + "  (a $" + (res - offer).toFixed(2) + ")" : "ninguna arriba"}`);
     console.log(`  RSI:           ${rsi != null ? rsi.toFixed(1) : "?"}`);
     for (const w of warns) console.log("  " + ylw("⚠ " + w));
