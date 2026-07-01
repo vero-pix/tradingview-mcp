@@ -39,11 +39,18 @@ const DIARIO    = path.join(HOME, "Trading", "diario_trades.jsonl");
 const ORDER_LOCK = path.join(os.tmpdir(), "capital_last_order.json");
 
 const MAX_SIZE      = process.env.MAX_SIZE      != null ? Number(process.env.MAX_SIZE)      : 0.5;
-const RESIST_BUFFER = process.env.RESIST_BUFFER != null ? Number(process.env.RESIST_BUFFER) : 3;
 const ATR_MULT      = process.env.ATR_MULT      != null ? Number(process.env.ATR_MULT)      : 2;
-// Piso mínimo de distancia del stop (USD). El 2×ATR de 1m suele ser ~$2, dentro del
-// ruido + spread → se stopea al toque. Este piso lo mantiene fuera del ruido.
-const MIN_STOP_USD  = process.env.MIN_STOP_USD  != null ? Number(process.env.MIN_STOP_USD)  : 6;
+// Tope de exposición en USD (size × precio). Independiente del instrumento: en ETH
+// o BTC frena una orden demasiado grande para la cuenta chica. 0 = sin tope.
+const MAX_NOTIONAL_USD = process.env.MAX_NOTIONAL_USD != null ? Number(process.env.MAX_NOTIONAL_USD) : 0;
+// Umbrales MULTI-INSTRUMENTO: en % del precio para que escalen solos (ETH ~$1570
+// y BTC ~$58000 no pueden usar el mismo $ fijo). Se pueden fijar en $ absoluto con
+// MIN_STOP_USD / RESIST_BUFFER si se prefiere.
+const MIN_STOP_PCT      = process.env.MIN_STOP_PCT      != null ? Number(process.env.MIN_STOP_PCT)      : 0.4;  // % ≈ $6 en ETH
+const RESIST_BUFFER_PCT = process.env.RESIST_BUFFER_PCT != null ? Number(process.env.RESIST_BUFFER_PCT) : 0.2;  // % ≈ $3 en ETH
+// Símbolo Binance para los indicadores (ATR/RSI), derivado del epic (ETHUSD→ETHUSDT).
+function binanceSymbol(ep) { return /USDT$/.test(ep) ? ep : ep.replace(/USD$/, "USDT"); }
+function symFromEpic(ep) { return ep.replace(/USD$/, "/USD"); }   // ETHUSD → ETH/USD
 
 // ---- args ----
 const argv    = process.argv.slice(2);
@@ -69,10 +76,10 @@ function notify(title, msg, sound) {
 }
 
 // Lee indicadores en vivo (Binance): precio|ema9|ema21|rsi|mom5|mom2|er|volr|volabs|atr
-function readIndicators() {
+function readIndicators(sym) {
     try {
         const out = execFileSync("bash", ["-c",
-            `BINANCE_INTERVAL=1m BINANCE_LIMIT=100 "${NODE}" scripts/ohlcv_binance.js | "${NODE}" scripts/calc_indicators.js`],
+            `BINANCE_SYMBOL=${sym} BINANCE_INTERVAL=1m BINANCE_LIMIT=100 "${NODE}" scripts/ohlcv_binance.js | "${NODE}" scripts/calc_indicators.js`],
             { cwd: DIR, encoding: "utf8" }).trim();
         const f = out.split("|").map(Number);
         if (f.length < 10 || f[0] === 0) return null;
@@ -177,12 +184,21 @@ async function cmdBuy() {
     if (offer == null) die("No pude leer el precio ask de Capital.");
     if (mkt.minDealSize != null && size < mkt.minDealSize) die(`size ${size} < mínimo del instrumento ${mkt.minDealSize}.`);
 
+    // Umbrales escalados al precio (multi-instrumento): $ absoluto si se fijó, si no % del precio.
+    const MIN_STOP  = process.env.MIN_STOP_USD  != null ? Number(process.env.MIN_STOP_USD)  : +(offer * MIN_STOP_PCT      / 100).toFixed(2);
+    const RES_BUF   = process.env.RESIST_BUFFER != null ? Number(process.env.RESIST_BUFFER) : +(offer * RESIST_BUFFER_PCT / 100).toFixed(2);
+
+    // Tope de exposición (notional = size × precio)
+    if (MAX_NOTIONAL_USD > 0 && size * offer > MAX_NOTIONAL_USD) {
+        die(`Exposición ${(size * offer).toFixed(0)} USD > MAX_NOTIONAL_USD ${MAX_NOTIONAL_USD} — bloqueado.`);
+    }
+
     // Stop/target: de flags o calculados con distancia MÍNIMA robusta.
-    // El stop se pone a max(2×ATR, MIN_STOP_USD) para no quedar dentro del ruido.
+    // El stop se pone a max(2×ATR, MIN_STOP) para no quedar dentro del ruido.
     // Si hay un soporte de zonas.env un poco más abajo (hasta 2× esa distancia),
     // el stop se apoya justo bajo el soporte (structure stop). El target sale con
     // RR 1:1 respecto de la distancia final del stop.
-    const ind = readIndicators();
+    const ind = readIndicators(binanceSymbol(epic));
     let stop     = flag("--stop")   != null ? Number(flag("--stop"))   : null;
     let target   = flag("--target") != null ? Number(flag("--target")) : null;
     let stopNota = "";
@@ -190,10 +206,10 @@ async function cmdBuy() {
         if (!ind) die("No pude derivar el ATR (pipe Binance falló) y no diste --stop. "
             + "NO se abre sin stop. Pasa --stop <precio>.");
         const atrDist = ATR_MULT * ind.atr;
-        let dist = Math.max(atrDist, MIN_STOP_USD);
-        stopNota = atrDist >= MIN_STOP_USD ? `${ATR_MULT}×ATR` : `piso $${MIN_STOP_USD}`;
+        let dist = Math.max(atrDist, MIN_STOP);
+        stopNota = atrDist >= MIN_STOP ? `${ATR_MULT}×ATR` : `piso $${MIN_STOP}`;
         const sup = nearestSupport(offer);
-        if (sup != null && (offer - sup) >= MIN_STOP_USD && (offer - sup) <= dist * 2) {
+        if (sup != null && (offer - sup) >= MIN_STOP && (offer - sup) <= dist * 2) {
             dist = (offer - sup) + 1;   // un dólar bajo el soporte
             stopNota = `bajo soporte ${sup}`;
         }
@@ -217,7 +233,7 @@ async function cmdBuy() {
         // pegadas al precio). El buffer absorbe el offset Binance→Capital y hace
         // que salga justo antes del techo.
         const useful = resistancesAbove(offer)
-            .map(r => ({ r, cand: +(r - RESIST_BUFFER).toFixed(2) }))
+            .map(r => ({ r, cand: +(r - RES_BUF).toFixed(2) }))
             .find(x => x.cand > offer + (offer - stop) * 0.8);
         if (useful) {
             target = useful.cand;
@@ -245,7 +261,7 @@ async function cmdBuy() {
         warns.push(`PROMEDIO A LA BAJA forzado (entrada prom ${pnl.weightedAvgEntry} > ${offer}).`);
     }
     if (rsi != null && rsi > 62) warns.push(`RSI ${rsi.toFixed(1)} > 62 (caliente, podés quedar pillada).`);
-    if (res != null && (res - offer) < RESIST_BUFFER) warns.push(`A $${(res - offer).toFixed(2)} de la resistencia ${res} (< $${RESIST_BUFFER}).`);
+    if (res != null && (res - offer) < RES_BUF) warns.push(`A $${(res - offer).toFixed(2)} de la resistencia ${res} (< $${RES_BUF}).`);
     if (target != null && (target - offer) < (offer - stop)) warns.push(`RR pobre: el target está más cerca que el stop.`);
 
     // ---- resumen ----
@@ -284,9 +300,9 @@ async function cmdBuy() {
 
     if (r.ok) {
         console.log(grn(`\n✅ LONG ABIERTO — dealId ${r.dealId} a ${r.level}\n`));
-        appendTrade({ id: r.dealId, sym: "ETH/USD", dir: "LONG", entryPx: r.level, size,
+        appendTrade({ id: r.dealId, sym: symFromEpic(epic), dir: "LONG", entryPx: r.level, size,
             openT: nowISO(), tag: "auto_con_stop", sl: stop, tp: target });
-        notify("🟢 LONG abierto ETH", `${size} @ ${r.level}, stop ${stop}` + (target ? `, target ${target}` : ""), "Hero");
+        notify(`🟢 LONG abierto ${epic}`, `${size} @ ${r.level}, stop ${stop}` + (target ? `, target ${target}` : ""), "Hero");
     } else if (r.dealStatus === "REJECTED") {
         notify("🔴 Orden RECHAZADA", `ETH: ${r.reason}`, "Basso");
         die("Orden RECHAZADA por Capital. Motivo: " + (r.reason || "desconocido") + " (no se reintenta).");
