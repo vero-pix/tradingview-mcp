@@ -10,7 +10,9 @@
 //   node scripts/capital_order.cjs status
 //   node scripts/capital_order.cjs buy --size 0.1 [--stop X] [--target Y] [--live] [--yes] [--force-promedio]
 //   node scripts/capital_order.cjs close --deal <dealId> [--live] [--yes]
-//   node scripts/capital_order.cjs close --all [--live] [--yes]
+//   node scripts/capital_order.cjs close --all | --half | --reddest [n]  [--live] [--yes]
+//     --half     cierra ~la mitad del tamaño (lotes más grandes primero)
+//     --reddest  cierra los n lotes más rojos (mayor precio de entrada), default 1
 //
 // Flags: --demo (cuenta demo), --live (envía real; sin él = dry-run), --yes
 //        (salta el prompt), --account "USD 2", --epic ETHUSD.
@@ -297,19 +299,56 @@ async function cmdBuy() {
 // close
 // =============================================================================
 async function cmdClose() {
-    const dealId = flag("--deal");
-    const all    = argv.includes("--all");
-    if (!dealId && !all) die("Usá --deal <dealId> o --all.");
+    const dealId   = flag("--deal");
+    const all      = argv.includes("--all");
+    const half     = argv.includes("--half");
+    const reddest  = argv.includes("--reddest");
+    const reddestN = Number(flag("--reddest", "1")) || 1;
+    if (!dealId && !all && !half && !reddest) die("Usa --deal <dealId>, --all, --half o --reddest [n].");
 
     await capital.selectAccount(account, { demo });
     const { positions, pnl } = await capital.getEthPosition({ demo, epic, account });
     if (!positions.length) { console.log("Sin posiciones abiertas en " + epic + "."); return; }
 
-    const targets = all ? positions : positions.filter(p => p.dealId === dealId);
-    if (!targets.length) die("No encontré una posición con dealId " + dealId + ". Corré `status` para ver los IDs.");
+    // Selección de lotes a cerrar
+    let targets, modoSel = "";
+    if (all) { targets = positions; modoSel = "TODAS"; }
+    else if (dealId) { targets = positions.filter(p => p.dealId === dealId); modoSel = "por dealId"; }
+    else if (reddest) {
+        // los más rojos = mayor precio de entrada (más bajo el agua para un long)
+        targets = positions.slice().sort((a, b) => b.openLevel - a.openLevel).slice(0, reddestN);
+        modoSel = `${reddestN} más roja(s) (mayor entrada)`;
+    } else { // --half: combinación de lotes más CERCANA a la mitad del size total
+        const totalSize = positions.reduce((s, p) => s + p.size, 0);
+        const objetivo = totalSize / 2;
+        const n = positions.length;
+        if (n <= 14) {
+            // fuerza bruta: mejor subconjunto (más cercano a la mitad; desempate: más rojo, menos lotes)
+            let best = null;
+            for (let mask = 1; mask < (1 << n); mask++) {
+                let sum = 0, redSum = 0, cnt = 0, subset = [];
+                for (let i = 0; i < n; i++) if (mask & (1 << i)) { sum += positions[i].size; redSum += positions[i].openLevel; cnt++; subset.push(positions[i]); }
+                const diff = Math.abs(sum - objetivo);
+                if (!best || diff < best.diff - 1e-9
+                    || (Math.abs(diff - best.diff) < 1e-9 && redSum > best.redSum)
+                    || (Math.abs(diff - best.diff) < 1e-9 && redSum === best.redSum && cnt < best.cnt)) {
+                    best = { diff, sum, redSum, cnt, subset };
+                }
+            }
+            targets = best.subset;
+            modoSel = `~mitad (${best.sum.toFixed(3)}/${totalSize.toFixed(3)})`;
+        } else {
+            const sorted = positions.slice().sort((a, b) => b.size - a.size);
+            targets = []; let acc = 0;
+            for (const p of sorted) { targets.push(p); acc += p.size; if (acc >= objetivo) break; }
+            modoSel = `~mitad (${acc.toFixed(3)}/${totalSize.toFixed(3)})`;
+        }
+    }
+    if (!targets.length) die("No encontré posición(es) a cerrar. Corre `status` para ver los IDs.");
 
-    console.log("\n══════ CERRAR POSICIÓN" + (all ? "ES" : "") + " · " + epic + " ══════");
-    if (pnl) console.log(`  P&L actual: ${fmt(pnl.unrealizedPnl)} USD (${fmt(pnl.pnlPct)}%), entrada ${pnl.weightedAvgEntry}, bid ${pnl.bid}`);
+    console.log("\n══════ CERRAR " + (targets.length > 1 ? "POSICIONES" : "POSICIÓN") + " · " + epic + " ══════");
+    console.log(`  Selección: ${modoSel}  (${targets.length} de ${positions.length} lote(s))`);
+    if (pnl) console.log(`  P&L total actual: ${fmt(pnl.unrealizedPnl)} USD (${fmt(pnl.pnlPct)}%), entrada ${pnl.weightedAvgEntry}, bid ${pnl.bid}`);
     for (const t of targets) console.log(`  - dealId ${t.dealId}  size ${t.size}  entrada ${t.openLevel}`);
     const modo = !live ? "DRY-RUN (simulado)" : (demo ? "DEMO" : red("LIVE · PLATA REAL"));
     console.log(`  Modo: ${modo}`);
