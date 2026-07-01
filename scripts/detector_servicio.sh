@@ -74,13 +74,18 @@ while true; do
     MAX_ENTRY=$("$NODE" -e "console.log(($P+2).toFixed(2))")
     echo "$(date '+%H:%M:%S') >>> ENTRADA p=$P rsi=$R ER=$ER vol=$VR sl=$SL tp=$TP maxEntry=$MAX_ENTRY"
     ./scripts/notify.sh "SEÑAL LONG · ETH $P · Vero" "✅ ENTRADA $P | 🛑 STOP $SL | 🎯 OBJETIVO $TP (riesgo \$$RISK). DIRECCIONAL (ER=$ER) + VOLUMEN ${VR}x, RSI $R. Confirma VWAP. Si pierde el STOP, SAL. NO promedies. ⏰ CADUCA si precio > \$$MAX_ENTRY (no perseguir)." "Hero"
-    # Armar orden (opcional, default OFF): incluye el comando de compra listo para
-    # que Vero solo lo confirme. Se activa con ARM_ORDER=1 en el entorno del servicio.
-    # NO ejecuta nada: solo propone. El size sugerido es ARM_SIZE (default 0.001).
+    # Armar orden (opcional, default OFF): escribe la señal para el bot de Telegram,
+    # que le manda a Vero los botones ✅/❌. Se activa con ARM_ORDER=1 en el entorno.
+    # NO ejecuta nada acá: el bot ejecuta solo si Vero toca ✅. Precios traducidos a
+    # Capital.com (Binance − offset ~3) para el chequeo de no-perseguir del bot.
     if [ "${ARM_ORDER:-0}" = "1" ]; then
-      CMD="cd ~/Trading/tradingview-mcp && node scripts/capital_order.cjs buy --size ${ARM_SIZE:-0.001} --live"
-      echo "$CMD" > /tmp/vero_armed_order.txt
-      ./scripts/notify.sh "🔫 Orden A+ lista para confirmar" "Pega en tu terminal y escribe CONFIRMO (o quita --live para simular): $CMD" "Glass"
+      OFF="${OFFSET:-3.0}"
+      SIG_TS=$(( $(date +%s) * 1000 ))
+      CAP_ENTRY=$("$NODE" -e "console.log(($P-$OFF).toFixed(2))")
+      CAP_SL=$("$NODE"    -e "console.log(($SL-$OFF).toFixed(2))")
+      CAP_TP=$("$NODE"    -e "console.log(($TP-$OFF).toFixed(2))")
+      printf '{"id":"sig%s","ts":%s,"epic":"ETHUSD","entry":%s,"stop":%s,"tp":%s}\n' \
+        "$SIG_TS" "$SIG_TS" "$CAP_ENTRY" "$CAP_SL" "$CAP_TP" > /tmp/vero_pending_order.json
     fi
     cooldown=50   # ~5 min de silencio tras avisar
     pb=0

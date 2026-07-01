@@ -2,31 +2,36 @@
 // =============================================================================
 // telegram_confirm_bot.cjs — Bot de Telegram con botones ✅ Comprar / ❌ Paso
 //
-// Cuando el detector arma una señal A+, este bot manda a Telegram un mensaje con
-// dos botones. Vero toca ✅ desde el celular y el bot ABRE la operación bracketeada
-// (stop + take-profit + tamaño chico). Toca ❌ y se cancela.
+// Cuando el detector arma una señal A+ (escribe /tmp/vero_pending_order.json),
+// el bot manda a Telegram un mensaje con dos botones. Vero toca ✅ desde el
+// celular (dentro de la ventana de validez) y el bot ABRE la operación
+// bracketeada reusando `capital_order.cjs buy` (stop + take-profit + guardrails).
 //
-// ⚠️ Seguridad: solo el chat de Vero (TELEGRAM_CHAT_ID) puede confirmar.
-//    Modos: sin flags = DRY-RUN (no opera, solo dice qué haría). --demo = cuenta
-//    demo. --live = cuenta real. Empezamos SIEMPRE en demo/dry-run.
+// ⚠️ Seguridad: solo el chat de Vero puede confirmar.
+//    Modos: sin flags = DRY-RUN (no opera). --demo = cuenta demo. --live = real.
+//    Antes de ejecutar valida: ventana de tiempo + que el precio no se disparó.
 //
 // Uso:
-//   node scripts/telegram_confirm_bot.cjs --test          # manda botones de prueba
-//   node scripts/telegram_confirm_bot.cjs --demo &        # escucha y opera en demo
-//   node scripts/telegram_confirm_bot.cjs --live &        # (más adelante) real
+//   node scripts/telegram_confirm_bot.cjs --test          # botones de prueba
+//   node scripts/telegram_confirm_bot.cjs --demo &        # escucha, opera en demo
+//   node scripts/telegram_confirm_bot.cjs --live &        # (real, con topes)
 //
-// La señal a proponer se lee de /tmp/vero_pending_order.json (la escribe el
-// detector). Formato: {epic, size, entry, stop, tp, ts}.
+// Env: BOT_SIZE (default 0.3), BOT_WINDOW_MIN (default 5), MAX_CHASE_USD (default 2).
 // =============================================================================
 
 const fs   = require("fs");
 const path = require("path");
 const os   = require("os");
+const { execFileSync } = require("child_process");
 const capital = require("./capital_client.cjs");
 
 const HOME = process.env.HOME;
 const DIR  = path.join(HOME, "Trading", "tradingview-mcp");
 const PENDING_FILE = path.join(os.tmpdir(), "vero_pending_order.json");
+const NODE = (() => {
+    const p = path.join(HOME, ".local/share/fnm/aliases/default/bin/node");
+    try { fs.accessSync(p, fs.constants.X_OK); return p; } catch (e) { return process.execPath; }
+})();
 
 const argv = process.argv.slice(2);
 const test = argv.includes("--test");
@@ -34,8 +39,11 @@ const live = argv.includes("--live");
 const demo = argv.includes("--demo");
 const MODE = live ? "LIVE" : (demo ? "DEMO" : "DRY-RUN");
 
-// -----------------------------------------------------------------------------
-// Credenciales de Telegram desde .env.telegram
+const SIZE       = process.env.BOT_SIZE       != null ? Number(process.env.BOT_SIZE)       : 0.3;
+const WINDOW_MS  = (process.env.BOT_WINDOW_MIN != null ? Number(process.env.BOT_WINDOW_MIN) : 5) * 60000;
+const MAX_CHASE  = process.env.MAX_CHASE_USD  != null ? Number(process.env.MAX_CHASE_USD)  : 2;
+const EPIC       = process.env.EPIC || "ETHUSD";
+
 // -----------------------------------------------------------------------------
 function loadEnv(filePath) {
     const env = {};
@@ -53,112 +61,133 @@ const CHAT  = ENV.TELEGRAM_CHAT_ID;
 const API   = `https://api.telegram.org/bot${TOKEN}`;
 
 function ts() { return new Date().toISOString().slice(11, 19); }
-
 async function tg(method, body) {
     const r = await fetch(`${API}/${method}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
     });
     return r.json();
 }
-
-// Manda el mensaje con botones para una señal (id = referencia única)
 async function sendButtons(id, text) {
-    return tg("sendMessage", {
-        chat_id: CHAT,
-        text,
-        reply_markup: { inline_keyboard: [[
-            { text: "✅ Comprar", callback_data: "buy:" + id },
-            { text: "❌ Paso",    callback_data: "skip:" + id },
-        ]]},
-    });
+    return tg("sendMessage", { chat_id: CHAT, text, reply_markup: { inline_keyboard: [[
+        { text: "✅ Comprar", callback_data: "buy:" + id },
+        { text: "❌ Paso",    callback_data: "skip:" + id },
+    ]]}});
 }
 
 // -----------------------------------------------------------------------------
-// Ejecutar la compra al confirmar (según MODE)
+// Ejecuta la compra reusando capital_order.cjs buy (todos los guardrails y el
+// bracket real en precio Capital). Devuelve {ok, msg}.
 // -----------------------------------------------------------------------------
-async function ejecutarCompra(order) {
-    if (MODE === "DRY-RUN") {
-        return { ok: true, msg: `[DRY-RUN] habría abierto ${order.size} ${order.epic} @~${order.entry}, stop ${order.stop}, TP ${order.tp}` };
+function ejecutarCompra() {
+    const args = ["scripts/capital_order.cjs", "buy", "--size", String(SIZE), "--epic", EPIC];
+    if (MODE === "DEMO") args.push("--demo", "--live", "--yes");
+    else if (MODE === "LIVE") args.push("--live", "--yes");
+    // DRY-RUN: sin --live → capital_order imprime lo que haría, no opera
+    try {
+        const out = execFileSync(NODE, args, { cwd: DIR, encoding: "utf8" });
+        const ok = /LONG ABIERTO|\[DRY-RUN\]/.test(out);
+        const linea = out.split("\n").find(l => /LONG ABIERTO|RECHAZAD|\[DRY-RUN\]/i.test(l))
+            || out.trim().split("\n").slice(-1)[0];
+        return { ok, msg: (MODE === "DRY-RUN" ? "[DRY-RUN] " : "") + (linea || "sin salida").trim() };
+    } catch (e) {
+        const o = (e.stdout || "") + (e.stderr || e.message || "");
+        return { ok: false, msg: "No se ejecutó: " + String(o).replace(/\s+/g, " ").trim().slice(0, 200) };
     }
-    // Validar que el precio no se disparó (no perseguir)
-    const useDemo = MODE === "DEMO";
-    await capital.selectAccount("USD 2", { demo: useDemo });
-    const mkt = await capital.getMarket(order.epic, { demo: useDemo });
-    if (mkt.offer > order.entry + 2) {
-        return { ok: false, msg: `Precio ya se fue (${mkt.offer} > entrada+$2). No persigo. Cancelado.` };
-    }
-    const r = await capital.openPosition({
-        epic: order.epic, direction: "BUY", size: order.size,
-        stopLevel: order.stop, profitLevel: order.tp, offer: mkt.offer, demo: useDemo,
-    });
-    if (r.ok) return { ok: true, msg: `✅ Abierto ${order.size} @ ${r.level}, stop ${order.stop}, TP ${order.tp} (dealId ${r.dealId})` };
-    return { ok: false, msg: `Rechazado: ${r.reason || r.dealStatus}` };
 }
 
 // -----------------------------------------------------------------------------
-// Loop de escucha (long polling)
+// Estado de la señal pendiente
+// -----------------------------------------------------------------------------
+let pending = null;   // {id, ts, entry, msgId}
+const enviados = new Set();   // ids ya mandados (no re-enviar)
+
+// Revisa el archivo pending; si hay una señal NUEVA, manda los botones.
+async function revisarPending() {
+    let data;
+    try { data = JSON.parse(fs.readFileSync(PENDING_FILE, "utf8")); } catch (e) { return; }
+    if (!data || !data.id) return;
+    if (enviados.has(data.id)) return;                       // ya la mandamos, no repetir
+
+    const entry = Number(data.entry);
+    const stopHint = data.stop ? ` · stop ~${data.stop}` : "";
+    const tpHint   = data.tp ? ` · objetivo ~${data.tp}` : "";
+    const txt = `🟢 SEÑAL A+ · ${data.epic || EPIC}\n`
+        + `entrada ~${entry}${stopHint}${tpHint} · size ${SIZE}\n`
+        + `Ventana: ${Math.round(WINDOW_MS / 60000)} min. ¿Confirmas la compra?`;
+    const r = await sendButtons(data.id, txt);
+    enviados.add(data.id);
+    pending = { id: data.id, ts: data.ts || Date.now(), entry, msgId: r.result && r.result.message_id };
+    console.log(`${ts()} 📨 señal ${data.id} enviada a Telegram (entrada ~${entry})`);
+}
+
+// -----------------------------------------------------------------------------
+// Loop de escucha (long polling) + revisión de pending
 // -----------------------------------------------------------------------------
 let offset = 0;
-const manejados = new Set();   // ids ya confirmados/cancelados (una sola vez)
+const manejados = new Set();
 
 async function poll() {
-    const upd = await tg("getUpdates", { offset, timeout: 30, allowed_updates: ["callback_query"] });
-    if (!upd.ok) { console.log(`${ts()} getUpdates error: ${JSON.stringify(upd).slice(0,120)}`); await capital.sleep(2000); return; }
+    const upd = await tg("getUpdates", { offset, timeout: 8, allowed_updates: ["callback_query"] });
+    if (!upd.ok) { console.log(`${ts()} getUpdates error`); await capital.sleep(2000); return; }
     for (const u of upd.result || []) {
         offset = u.update_id + 1;
         const cq = u.callback_query;
         if (!cq) continue;
-        // Seguridad: solo el chat de Vero
         if (String(cq.message.chat.id) !== String(CHAT)) {
-            await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "No autorizado" });
-            continue;
+            await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "No autorizado" }); continue;
         }
         const [action, id] = String(cq.data).split(":");
-        if (manejados.has(id)) {
-            await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Ya procesado" });
-            continue;
-        }
+        if (manejados.has(id)) { await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Ya procesado" }); continue; }
         manejados.add(id);
 
         if (action === "skip") {
             await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Cancelado ❌" });
-            await tg("editMessageText", { chat_id: CHAT, message_id: cq.message.message_id,
-                text: cq.message.text + "\n\n❌ CANCELADO por ti." });
+            await tg("editMessageText", { chat_id: CHAT, message_id: cq.message.message_id, text: cq.message.text + "\n\n❌ CANCELADO por ti." });
             console.log(`${ts()} ❌ PASO (id ${id})`);
+            if (pending && pending.id === id) pending = null;
             continue;
         }
-        if (action === "buy") {
-            await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Confirmado ✅ ejecutando..." });
-            console.log(`${ts()} ✅ COMPRAR (id ${id}) — modo ${MODE}`);
-            let order = null;
-            if (test) {
-                order = { epic: "ETHUSD", size: 0.01, entry: 1600, stop: 1594, tp: 1608 };
-            } else {
-                try { order = JSON.parse(fs.readFileSync(PENDING_FILE, "utf8")); } catch (e) {}
-            }
-            let res;
-            if (!order) res = { ok: false, msg: "No había orden armada (pending vacío)." };
-            else { try { res = await ejecutarCompra(order); } catch (e) { res = { ok: false, msg: "Error: " + e.message }; } }
-            await tg("editMessageText", { chat_id: CHAT, message_id: cq.message.message_id,
-                text: cq.message.text + "\n\n" + (res.ok ? "✅ " : "⚠️ ") + res.msg });
-            console.log(`${ts()}   → ${res.msg}`);
+        if (action !== "buy") continue;
+
+        await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Verificando..." });
+        console.log(`${ts()} ✅ COMPRAR (id ${id}) — modo ${MODE}`);
+
+        let res;
+        if (test) {
+            res = ejecutarCompra();   // en test igual ejecuta (dry-run si no hay --live)
+        } else if (!pending || pending.id !== id) {
+            res = { ok: false, msg: "Señal ya no está activa." };
+        } else if (Date.now() - pending.ts > WINDOW_MS) {
+            res = { ok: false, msg: `Caducó (pasaron más de ${Math.round(WINDOW_MS/60000)} min).` };
+        } else {
+            // no perseguir: el precio no debe haberse ido > MAX_CHASE sobre la entrada de la señal
+            try {
+                const mkt = await capital.getMarket(EPIC, { demo: MODE === "DEMO" });
+                if (mkt.offer > pending.entry + MAX_CHASE) {
+                    res = { ok: false, msg: `Ya se fue (${mkt.offer} > entrada+$${MAX_CHASE}). No persigo.` };
+                } else {
+                    res = ejecutarCompra();
+                }
+            } catch (e) { res = { ok: false, msg: "Error validando precio: " + e.message }; }
         }
+        await tg("editMessageText", { chat_id: CHAT, message_id: cq.message.message_id,
+            text: cq.message.text + "\n\n" + (res.ok ? "✅ " : "⚠️ ") + res.msg });
+        console.log(`${ts()}   → ${res.msg}`);
+        if (pending && pending.id === id) pending = null;
     }
 }
 
 (async () => {
-    if (!TOKEN || !CHAT) { console.error("Faltan TELEGRAM_BOT_TOKEN/CHAT_ID en .env.telegram"); process.exit(1); }
-    console.log(`${ts()} bot de confirmación arrancado · modo ${MODE}${test ? " · TEST" : ""}`);
+    if (!TOKEN || !CHAT) { console.error("Faltan credenciales de Telegram"); process.exit(1); }
+    console.log(`${ts()} bot de confirmación arrancado · modo ${MODE} · size ${SIZE} · ventana ${Math.round(WINDOW_MS/60000)}min${test ? " · TEST" : ""}`);
 
     if (test) {
-        const id = "test1";
-        const r = await sendButtons(id, "🟢 PRUEBA · Señal A+ ETH\nentrada ~1600 · stop 1594 · objetivo 1608 · size 0.01\n\n¿Confirmas la compra?");
-        console.log(`${ts()} mensaje de prueba enviado (${r.ok ? "ok" : JSON.stringify(r).slice(0,100)}). Toca ✅ o ❌ en Telegram...`);
+        // señal de prueba: escribe un pending falso para ejercitar todo el flujo
+        fs.writeFileSync(PENDING_FILE, JSON.stringify({ id: "test-" + Math.floor(Date.now()/1000), ts: Date.now(), epic: "ETHUSD", entry: 1600, stop: 1594, tp: 1608 }));
     }
 
     while (true) {
-        try { await poll(); } catch (e) { console.log(`${ts()} error poll: ${e.message}`); await capital.sleep(2000); }
+        try { await revisarPending(); } catch (e) { console.log(`${ts()} err pending: ${e.message}`); }
+        try { await poll(); } catch (e) { console.log(`${ts()} err poll: ${e.message}`); await capital.sleep(2000); }
     }
 })();
