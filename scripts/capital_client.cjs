@@ -299,6 +299,8 @@ async function getPositions({ demo = false, epic = null } = {}) {
             openLevel:    Number(p.level != null ? p.level : p.openLevel),
             contractSize: Number(p.contractSize != null ? p.contractSize : 1),
             currency:     p.currency,
+            stopLevel:    p.stopLevel != null ? Number(p.stopLevel) : null,
+            limitLevel:   p.limitLevel != null ? Number(p.limitLevel) : (p.profitLevel != null ? Number(p.profitLevel) : null),
             bid:          m.bid,
             offer:        m.offer,
         };
@@ -494,6 +496,32 @@ async function closePosition(dealId, { demo = false } = {}) {
     };
 }
 
+/**
+ * Modifica el stop/target de una posición abierta (PUT → confirma).
+ * Solo cambia lo que se pasa. Usado por el breakeven para SUBIR el stop.
+ * @returns {{ok, dealStatus, reason, dealId}}
+ */
+async function updatePosition(dealId, { stopLevel = null, profitLevel = null, demo = false } = {}) {
+    if (!dealId || typeof dealId !== "string") {
+        throw new Error("updatePosition: falta dealId válido.");
+    }
+    const body = {};
+    if (stopLevel   != null) body.stopLevel   = Number(stopLevel);
+    if (profitLevel != null) body.profitLevel = Number(profitLevel);
+    if (!Object.keys(body).length) throw new Error("updatePosition: nada que cambiar.");
+
+    const res = await apiCall("PUT", "/api/v1/positions/" + encodeURIComponent(dealId), { demo, body });
+    if (isLockError(res)) {
+        throw new Error("Modificación rechazada por rate limit/bloqueo.");
+    }
+    if (res.status !== 200 || !res.data || !res.data.dealReference) {
+        throw new Error("PUT /positions falló (status " + res.status + "): " + JSON.stringify(res.data));
+    }
+    await sleep(250);
+    const conf = await confirmDeal(res.data.dealReference, { demo });
+    return { ok: conf.dealStatus === "ACCEPTED", dealStatus: conf.dealStatus, reason: conf.reason, dealId };
+}
+
 module.exports = {
     HOST_LIVE, HOST_DEMO, SESSION_FILE,
     loadEnv, getConfig, request, sleep,
@@ -502,5 +530,5 @@ module.exports = {
     getAccounts, selectAccount,
     getMarket, getPrice,
     getPositions, computePnL, getEthPosition,
-    validateLongOrder, openPosition, confirmDeal, closePosition,
+    validateLongOrder, openPosition, confirmDeal, closePosition, updatePosition,
 };
