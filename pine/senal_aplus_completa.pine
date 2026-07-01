@@ -42,10 +42,14 @@ vwap_bloquea = input.bool(true, "VWAP bloquea la señal (precio debe estar sobre
 // de la resistencia más cercana ARRIBA, o el spread se come la ganancia.
 // Defaults = zonas autodetectadas 2026-07-01 en precio Capital.com (Binance −~3):
 // 1575 (techo fuerte, 9 toques), 1580, 1585. Actualízalas cuando cambie el rango.
-res1     = input.float(1575.0, "Resistencia 1 ($)", group="Resistencias")
-res2     = input.float(1580.0, "Resistencia 2 ($)", group="Resistencias")
-res3     = input.float(1585.0, "Resistencia 3 ($)", group="Resistencias")
-dist_min = input.float(3.0, "Distancia mínima a resistencia ($)", step=0.5, group="Resistencias")
+res1     = input.float(1575.0, "Resistencia 1 ETH ($)", group="Resistencias ETH")
+res2     = input.float(1580.0, "Resistencia 2 ETH ($)", group="Resistencias ETH")
+res3     = input.float(1585.0, "Resistencia 3 ETH ($)", group="Resistencias ETH")
+dist_min = input.float(3.0, "Distancia mínima a resistencia ($)", step=0.5, group="Resistencias ETH")
+// Resistencias de BTC (se usan solas cuando el chart es un símbolo con "BTC")
+res1_btc = input.float(60285.0, "Resistencia 1 BTC ($)", group="Resistencias BTC")
+res2_btc = input.float(60609.0, "Resistencia 2 BTC ($)", group="Resistencias BTC")
+res3_btc = input.float(60780.0, "Resistencia 3 BTC ($)", group="Resistencias BTC")
 resist_bloquea = input.bool(true, "Resistencia bloquea la señal", group="Resistencias")
 
 // --- Visual ---
@@ -109,13 +113,20 @@ volabs  = vol3
 // -----------------------------------------------------------------------------
 // Resistencia más cercana POR ENCIMA del precio (ignora las que valen 0)
 // -----------------------------------------------------------------------------
+// Auto-selección de resistencias según el instrumento del chart (BTC vs ETH)
+es_btc = str.contains(syminfo.ticker, "BTC")
+r1 = es_btc ? res1_btc : res1
+r2 = es_btc ? res2_btc : res2
+r3 = es_btc ? res3_btc : res3
+// Distancia mínima a resistencia: en ETH usa dist_min ($3); en BTC 0.2% del precio
+dist_eff = es_btc ? precio * 0.002 : dist_min
 nearest_res = float(na)
-if res1 > 0 and res1 > precio
-    nearest_res := na(nearest_res) ? res1 : math.min(nearest_res, res1)
-if res2 > 0 and res2 > precio
-    nearest_res := na(nearest_res) ? res2 : math.min(nearest_res, res2)
-if res3 > 0 and res3 > precio
-    nearest_res := na(nearest_res) ? res3 : math.min(nearest_res, res3)
+if r1 > 0 and r1 > precio
+    nearest_res := na(nearest_res) ? r1 : math.min(nearest_res, r1)
+if r2 > 0 and r2 > precio
+    nearest_res := na(nearest_res) ? r2 : math.min(nearest_res, r2)
+if r3 > 0 and r3 > precio
+    nearest_res := na(nearest_res) ? r3 : math.min(nearest_res, r3)
 dist_res = na(nearest_res) ? na : nearest_res - precio
 
 // -----------------------------------------------------------------------------
@@ -152,7 +163,7 @@ f8_volr = volr >= volr_min
 f9_vwap = precio > vwapv
 
 // Filtro 9: lejos de resistencia (o no hay resistencia arriba)
-f10_resist = na(nearest_res) or dist_res >= dist_min
+f10_resist = na(nearest_res) or dist_res >= dist_eff
 
 // -----------------------------------------------------------------------------
 // Señal A+ completa: obligatorios siempre; VWAP y resistencia según switch
@@ -291,7 +302,7 @@ if mostrar_tabla and barstate.islast
 
     // F9: Resistencia
     res_lbl = na(nearest_res) ? "sin R arriba" : "a $" + str.tostring(dist_res, "0.0")
-    table.cell(tbl, 0, 9, "9. Lejos de R (≥ $" + str.tostring(dist_min, "0.0") + ")",
+    table.cell(tbl, 0, 9, "9. Lejos de R (≥ $" + str.tostring(dist_eff, "0.0") + ")",
          text_color=color.white, text_size=size.small)
     table.cell(tbl, 1, 9, cell_txt(f10_resist, res_lbl),
          bgcolor=cell_bg(f10_resist), text_size=size.small)
