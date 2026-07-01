@@ -14,7 +14,7 @@
 //   - No entrar a < $3 de una resistencia (filtro nuevo)
 // =============================================================================
 
-indicator("Señal A+ Completa", shorttitle="A+ ETH", overlay=false)
+indicator("Señal A+ Completa", shorttitle="A+", overlay=false)
 
 // Este indicador está calibrado SOLO para velas de 1 minuto (mom5, volr, ER, RSI).
 // En otra temporalidad los números siguen apareciendo pero NO son válidos.
@@ -32,7 +32,7 @@ tf_5m      = input.timeframe("5", "Timeframe contexto",             group="ER Du
 // --- Filtros señal A+ ---
 rsi_min    = input.float(50.0, "RSI mínimo",              step=1.0,  group="Filtros A+")
 rsi_max    = input.float(62.0, "RSI máximo (spread adj)", step=1.0,  group="Filtros A+")
-mom5_min   = input.float(1.75, "Mom5 mínimo ($)",         step=0.25, group="Filtros A+")
+mom5_pct   = input.float(0.11, "Mom5 mínimo (% del precio)", step=0.01, group="Filtros A+")
 volr_min   = input.float(1.20, "VolR mínimo",             step=0.05, group="Filtros A+")
 volabs_min = input.float(10.0, "VolAbs mínimo (mercado vivo)", step=1.0, group="Filtros A+")
 vwap_bloquea = input.bool(true, "VWAP bloquea la señal (precio debe estar sobre VWAP)", group="Filtros A+")
@@ -138,7 +138,9 @@ f4_alcista = e9 > e21
 f5_pullback = (low[2] <= e9[2] or low[3] <= e9[3] or low[4] <= e9[4]) and precio > e9
 
 // Filtro 5b: momentum suficiente para cubrir el spread ($1,75)
-f6_mom5 = mom5 >= mom5_min
+// Umbral de mom5 en % del precio → sirve igual para ETH (~$1.75) y BTC (~$66)
+mom5_umbral = close * mom5_pct / 100
+f6_mom5 = mom5 >= mom5_umbral
 
 // Filtro 6: RSI en rango óptimo (con fuerza pero sin sobrecompra)
 f7_rsi = rsi >= rsi_min and rsi <= rsi_max
@@ -264,7 +266,7 @@ if mostrar_tabla and barstate.islast
          bgcolor=cell_bg(f4_alcista), text_size=size.small)
 
     // F5: Pullback + Mom5
-    table.cell(tbl, 0, 5, "5. Pullback + Mom5 > " + str.tostring(mom5_min, "0.00"),
+    table.cell(tbl, 0, 5, "5. Pullback + Mom5 > " + str.tostring(mom5_umbral, "0.00"),
          text_color=color.white, text_size=size.small)
     table.cell(tbl, 1, 5, cell_txt(f5_pullback and f6_mom5, str.tostring(mom5, "0.00")),
          bgcolor=cell_bg(f5_pullback and f6_mom5), text_size=size.small)
