@@ -39,6 +39,9 @@ const ORDER_LOCK = path.join(os.tmpdir(), "capital_last_order.json");
 const MAX_SIZE      = process.env.MAX_SIZE      != null ? Number(process.env.MAX_SIZE)      : 0.5;
 const RESIST_BUFFER = process.env.RESIST_BUFFER != null ? Number(process.env.RESIST_BUFFER) : 3;
 const ATR_MULT      = process.env.ATR_MULT      != null ? Number(process.env.ATR_MULT)      : 2;
+// Piso mínimo de distancia del stop (USD). El 2×ATR de 1m suele ser ~$2, dentro del
+// ruido + spread → se stopea al toque. Este piso lo mantiene fuera del ruido.
+const MIN_STOP_USD  = process.env.MIN_STOP_USD  != null ? Number(process.env.MIN_STOP_USD)  : 6;
 
 // ---- args ----
 const argv    = process.argv.slice(2);
@@ -85,6 +88,19 @@ function nearestResistance(price) {
     } catch (e) { return null; }
 }
 
+// Soporte más cercano por debajo del precio (de zonas.env). Nota: las zonas están
+// en precio Binance (~$3 sobre Capital), así que al usarlas como piso de stop en
+// precio Capital, el stop queda un poco MÁS ancho — lado seguro.
+function nearestSupport(price) {
+    try {
+        const txt = fs.readFileSync(path.join(DIR, "scripts", "zonas.env"), "utf8");
+        const m = txt.match(/^export ZONAS="([^"]+)"/m);
+        if (!m) return null;
+        const below = m[1].split(",").map(Number).filter(x => x < price).sort((a, b) => b - a);
+        return below.length ? below[0] : null;
+    } catch (e) { return null; }
+}
+
 function askConfirm(promptTxt) {
     return new Promise(resolve => {
         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -122,6 +138,15 @@ function nowISO() {
     // formato compatible con el diario: "YYYY-MM-DD HH:MM:SS +00:00"
     return new Date().toISOString().replace("T", " ").replace(/\.\d+Z$/, " +00:00");
 }
+// Parsea ambos formatos a ms UTC: diario "YYYY-MM-DD HH:MM:SS +00:00" y
+// tx "YYYY-MM-DDTHH:MM:SS.sss" (sin tz → se asume UTC).
+function parseTS(s) {
+    if (!s) return NaN;
+    let t = String(s).trim().replace(" +00:00", "").replace("+00:00", "");
+    t = t.replace(" ", "T").trim();
+    if (!/[Zz]$/.test(t)) t += "Z";
+    return new Date(t).getTime();
+}
 
 // =============================================================================
 // buy
@@ -130,7 +155,7 @@ async function cmdBuy() {
     const size = Number(flag("--size"));
     if (!(size > 0)) die("Falta --size válido (> 0).");
     if (size > MAX_SIZE) die(`size ${size} > MAX_SIZE ${MAX_SIZE} — bloqueado (red anti fat-finger). `
-        + `Subí MAX_SIZE a propósito si de verdad querés más.`);
+        + `Sube MAX_SIZE a propósito si de verdad quieres más.`);
 
     await capital.selectAccount(account, { demo });
     const mkt = await capital.getMarket(epic, { demo });
@@ -139,16 +164,29 @@ async function cmdBuy() {
     if (offer == null) die("No pude leer el precio ask de Capital.");
     if (mkt.minDealSize != null && size < mkt.minDealSize) die(`size ${size} < mínimo del instrumento ${mkt.minDealSize}.`);
 
-    // Stop/target: de flags o derivados de ATR
+    // Stop/target: de flags o calculados con distancia MÍNIMA robusta.
+    // El stop se pone a max(2×ATR, MIN_STOP_USD) para no quedar dentro del ruido.
+    // Si hay un soporte de zonas.env un poco más abajo (hasta 2× esa distancia),
+    // el stop se apoya justo bajo el soporte (structure stop). El target sale con
+    // RR 1:1 respecto de la distancia final del stop.
     const ind = readIndicators();
-    let stop   = flag("--stop")   != null ? Number(flag("--stop"))   : null;
-    let target = flag("--target") != null ? Number(flag("--target")) : null;
+    let stop     = flag("--stop")   != null ? Number(flag("--stop"))   : null;
+    let target   = flag("--target") != null ? Number(flag("--target")) : null;
+    let stopNota = "";
     if (stop == null) {
         if (!ind) die("No pude derivar el ATR (pipe Binance falló) y no diste --stop. "
-            + "NO se abre sin stop. Pasá --stop <precio>.");
-        stop = +(offer - ATR_MULT * ind.atr).toFixed(2);
+            + "NO se abre sin stop. Pasa --stop <precio>.");
+        const atrDist = ATR_MULT * ind.atr;
+        let dist = Math.max(atrDist, MIN_STOP_USD);
+        stopNota = atrDist >= MIN_STOP_USD ? `${ATR_MULT}×ATR` : `piso $${MIN_STOP_USD}`;
+        const sup = nearestSupport(offer);
+        if (sup != null && (offer - sup) >= MIN_STOP_USD && (offer - sup) <= dist * 2) {
+            dist = (offer - sup) + 1;   // un dólar bajo el soporte
+            stopNota = `bajo soporte ${sup}`;
+        }
+        stop = +(offer - dist).toFixed(2);
     }
-    if (target == null && ind) target = +(offer + ATR_MULT * ind.atr).toFixed(2);
+    if (target == null) target = +(offer + (offer - stop)).toFixed(2);   // RR 1:1
 
     const contractSize = 1; // ETH cripto: 1; el size ya está en unidades
     const riesgoUSD   = (offer - stop) * size * contractSize;
@@ -161,8 +199,8 @@ async function cmdBuy() {
     // anti-promedio (ABORT con override)
     const { pnl } = await capital.getEthPosition({ demo, epic, account });
     if (pnl && pnl.side === "BUY" && offer < pnl.weightedAvgEntry && !forcePromedio) {
-        die(`PROMEDIAR A LA BAJA: ya tenés un long a ${pnl.weightedAvgEntry} y querés entrar a ${offer}. `
-            + `Es tu regla de oro PROHIBIDA. Si de verdad lo querés, agregá --force-promedio.`);
+        die(`PROMEDIAR A LA BAJA: ya tienes un long a ${pnl.weightedAvgEntry} y quieres entrar a ${offer}. `
+            + `Es tu regla de oro PROHIBIDA. Si de verdad lo quieres, agrega --force-promedio.`);
     }
     if (pnl && pnl.side === "BUY" && offer < pnl.weightedAvgEntry && forcePromedio) {
         warns.push(`PROMEDIO A LA BAJA forzado (entrada prom ${pnl.weightedAvgEntry} > ${offer}).`);
@@ -177,7 +215,7 @@ async function cmdBuy() {
     console.log(`  Cuenta:        ${account}   (${modo})`);
     console.log(`  Precio ask:    ${offer}   (bid ${bid}, spread ${mkt.spread})`);
     console.log(`  Size:          ${size}`);
-    console.log(`  Stop:          ${stop}   (riesgo ${fmt(-Math.abs(riesgoUSD))} USD)`);
+    console.log(`  Stop:          ${stop}   (${stopNota ? stopNota + ", " : ""}−$${(offer - stop).toFixed(2)}, riesgo ${fmt(-Math.abs(riesgoUSD))} USD)`);
     console.log(`  Target:        ${target != null ? target + "   (ganancia " + fmt(gananciaUSD) + " USD)" : "(sin target)"}`);
     console.log(`  Resistencia +: ${res != null ? res + "  (a $" + (res - offer).toFixed(2) + ")" : "ninguna arriba"}`);
     console.log(`  RSI:           ${rsi != null ? rsi.toFixed(1) : "?"}`);
@@ -190,12 +228,12 @@ async function cmdBuy() {
     if (!live) {
         console.log("  " + grn("[DRY-RUN] no se envió nada.") + " Body que se mandaría:");
         console.log("  " + JSON.stringify(body));
-        console.log("  (para enviar de verdad agregá --live)\n");
+        console.log("  (para enviar de verdad agrega --live)\n");
         return;
     }
 
     if (!yes) {
-        const ok = await askConfirm("  Escribí CONFIRMO para enviar (cualquier otra cosa aborta): ");
+        const ok = await askConfirm("  Escribe CONFIRMO para enviar (cualquier otra cosa aborta): ");
         if (!ok) die("Abortado por el usuario (no se escribió CONFIRMO).");
     }
 
@@ -207,14 +245,14 @@ async function cmdBuy() {
 
     if (r.ok) {
         console.log(grn(`\n✅ LONG ABIERTO — dealId ${r.dealId} a ${r.level}\n`));
-        appendTrade({ id: r.dealId, sym: "ETH/USD", dir: "LONG", entryPx: r.level,
+        appendTrade({ id: r.dealId, sym: "ETH/USD", dir: "LONG", entryPx: r.level, size,
             openT: nowISO(), tag: "auto_con_stop", sl: stop, tp: target });
         notify("🟢 LONG abierto ETH", `${size} @ ${r.level}, stop ${stop}` + (target ? `, target ${target}` : ""), "Hero");
     } else if (r.dealStatus === "REJECTED") {
         notify("🔴 Orden RECHAZADA", `ETH: ${r.reason}`, "Basso");
         die("Orden RECHAZADA por Capital. Motivo: " + (r.reason || "desconocido") + " (no se reintenta).");
     } else {
-        die("Estado " + r.dealStatus + " — REVISÁ LA APP de Capital antes de operar de nuevo. " + (r.reason || ""));
+        die("Estado " + r.dealStatus + " — REVISA LA APP de Capital antes de operar de nuevo. " + (r.reason || ""));
     }
 }
 
@@ -240,9 +278,9 @@ async function cmdClose() {
     console.log(`  Modo: ${modo}`);
     console.log("  ────────────────────────────────────────");
 
-    if (!live) { console.log("  " + grn("[DRY-RUN] no se cerró nada.") + " (agregá --live para cerrar de verdad)\n"); return; }
+    if (!live) { console.log("  " + grn("[DRY-RUN] no se cerró nada.") + " (agrega --live para cerrar de verdad)\n"); return; }
     if (!yes) {
-        const ok = await askConfirm("  Escribí CONFIRMO para cerrar (cualquier otra cosa aborta): ");
+        const ok = await askConfirm("  Escribe CONFIRMO para cerrar (cualquier otra cosa aborta): ");
         if (!ok) die("Abortado por el usuario.");
     }
 
@@ -259,11 +297,54 @@ async function cmdClose() {
             closeTrade(t.dealId, { exitPx, rpl, swap: 0, net: rpl, closeT: nowISO() });
             notify("🔵 ETH cerrado", `dealId ${t.dealId} a ${exitPx}, rpl ${fmt(rpl)}`, rpl >= 0 ? "Hero" : "Basso");
         } else {
-            console.log(red(`  ${r.dealStatus} ${t.dealId}: ${r.reason || ""} — revisá la app`));
+            console.log(red(`  ${r.dealStatus} ${t.dealId}: ${r.reason || ""} — revisa la app`));
         }
         await capital.sleep(150);
     }
     console.log("");
+}
+
+// =============================================================================
+// reconcile — completa en el diario los trades que cerró el bróker (SL/TP)
+//   Busca filas abiertas (sin closeT) cuyo dealId ya NO está en posiciones abiertas,
+//   las cruza con el historial de transacciones (campo size = P&L realizado) y
+//   completa exitPx/rpl/net/closeT. Sin esto, un cierre por stop/target queda sin
+//   registrar (nuestro comando close no se ejecutó).
+// =============================================================================
+async function cmdReconcile() {
+    await capital.selectAccount(account, { demo });
+    const open = await capital.getPositions({ demo, epic: null });
+    const openIds = new Set(open.map(p => p.dealId));
+
+    let lines = [];
+    try { lines = fs.readFileSync(DIARIO, "utf8").split("\n").filter(Boolean); } catch (e) {}
+    const rows = lines.map(l => { try { return JSON.parse(l); } catch (e) { return null; } });
+    const orphans = rows.filter(o => o && o.id && o.closeT == null && !openIds.has(o.id));
+    if (!orphans.length) { console.log("Nada que reconciliar: el diario está al día."); return; }
+
+    const r = await capital.apiCall("GET", "/api/v1/history/transactions?lastPeriod=86400", { demo });
+    const tx = ((r.data && r.data.transactions) || [])
+        .filter(t => t.transactionType === "TRADE" && /clos/i.test(t.note || ""))
+        .map(t => ({ date: t.dateUtc || t.date, ms: parseTS(t.dateUtc || t.date), net: Number(t.size), dealId: t.dealId, used: false }))
+        .sort((a, b) => a.ms - b.ms);
+
+    let done = 0;
+    for (const o of orphans.sort((a, b) => parseTS(a.openT) - parseTS(b.openT))) {
+        // Match: dealId exacto primero; si no, el cierre más temprano tras la apertura.
+        let m = tx.find(t => !t.used && t.dealId === o.id);
+        if (!m) m = tx.find(t => !t.used && t.ms >= parseTS(o.openT) - 2000);
+        const closeT = m ? m.date.replace("T", " ").replace(/\..*$/, "") + " +00:00" : nowISO();
+        const patch = { closeT, tag: (o.tag ? o.tag + "|" : "") + "cerrada_broker" };
+        if (m) {
+            m.used = true;
+            patch.net = +m.net.toFixed(2); patch.rpl = +m.net.toFixed(2); patch.swap = 0;
+            if (o.size) patch.exitPx = +(o.entryPx + m.net / o.size).toFixed(2);
+        }
+        closeTrade(o.id, patch);
+        console.log(`  reconciliado ${o.id}: net ${m ? fmt(m.net) : "?"} · closeT ${closeT}`);
+        done++;
+    }
+    console.log(`\n${done} posición(es) reconciliada(s) en el diario.\n`);
 }
 
 // =============================================================================
@@ -281,11 +362,12 @@ async function cmdStatus() {
 // =============================================================================
 (async () => {
     try {
-        if (cmd === "buy")         await cmdBuy();
-        else if (cmd === "close")  await cmdClose();
-        else if (cmd === "status") await cmdStatus();
+        if (cmd === "buy")            await cmdBuy();
+        else if (cmd === "close")     await cmdClose();
+        else if (cmd === "status")    await cmdStatus();
+        else if (cmd === "reconcile") await cmdReconcile();
         else {
-            console.log("Comandos: status | buy --size N [...] | close --deal <id>|--all");
+            console.log("Comandos: status | buy --size N [...] | close --deal <id>|--all | reconcile");
             console.log("Sin --live todo es DRY-RUN (simulado). Ver cabecera del archivo.");
             process.exit(cmd ? 1 : 0);
         }
