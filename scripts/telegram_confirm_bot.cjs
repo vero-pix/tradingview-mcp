@@ -50,6 +50,19 @@ const SIZE       = process.env.BOT_SIZE       != null ? Number(process.env.BOT_S
 const WINDOW_MS  = (process.env.BOT_WINDOW_MIN != null ? Number(process.env.BOT_WINDOW_MIN) : 5) * 60000;
 const MAX_CHASE  = process.env.MAX_CHASE_USD  != null ? Number(process.env.MAX_CHASE_USD)  : 2;
 const EPIC       = process.env.EPIC || "ETHUSD";
+// Exposición objetivo en USD (size × precio). Para ETH, 0.1 ≈ $160. Se usa para
+// escalar el size en OTROS instrumentos (BTC 0.1 = $6000 sería enorme).
+const NOTIONAL   = process.env.BOT_NOTIONAL_USD != null ? Number(process.env.BOT_NOTIONAL_USD) : 160;
+
+// Tamaño por instrumento: BOT_SIZE_<EPIC> fija; ETHUSD usa SIZE; otros = notional/precio.
+function sizeFor(epic, price, minDeal) {
+    const ov = process.env["BOT_SIZE_" + epic];
+    if (ov != null) return Number(ov);
+    if (epic === "ETHUSD" || !price) return SIZE;
+    let s = NOTIONAL / price;
+    if (minDeal) s = Math.max(minDeal, Math.round(s / minDeal) * minDeal);
+    return +s.toFixed(6);
+}
 
 // -----------------------------------------------------------------------------
 function loadEnv(filePath) {
@@ -85,8 +98,8 @@ async function sendButtons(id, text) {
 // Ejecuta la compra reusando capital_order.cjs buy (todos los guardrails y el
 // bracket real en precio Capital). Devuelve {ok, msg}.
 // -----------------------------------------------------------------------------
-function ejecutarCompra(epic) {
-    const args = ["scripts/capital_order.cjs", "buy", "--size", String(SIZE), "--epic", epic || EPIC];
+function ejecutarCompra(epic, size) {
+    const args = ["scripts/capital_order.cjs", "buy", "--size", String(size || SIZE), "--epic", epic || EPIC];
     if (MODE === "DEMO") args.push("--demo", "--live", "--yes");
     else if (MODE === "LIVE") args.push("--live", "--yes");
     // DRY-RUN: sin --live → capital_order imprime lo que haría, no opera
@@ -122,10 +135,12 @@ async function procesarPending(data) {
     if (edad > WINDOW_MS) { enviados.add(data.id); return; }
 
     const entry = Number(data.entry);
+    const epic  = data.epic || EPIC;
+    const szDisplay = sizeFor(epic, entry, null);
     const stopHint = data.stop ? ` · stop ~${data.stop}` : "";
     const tpHint   = data.tp ? ` · objetivo ~${data.tp}` : "";
-    const txt = `🟢 SEÑAL A+ · ${data.epic || EPIC}\n`
-        + `entrada ~${entry}${stopHint}${tpHint} · size ${SIZE}\n`
+    const txt = `🟢 SEÑAL A+ · ${epic}\n`
+        + `entrada ~${entry}${stopHint}${tpHint} · size ~${szDisplay}\n`
         + `Ventana: ${Math.round(WINDOW_MS / 60000)} min. ¿Confirmas la compra?`;
     const r = await sendButtons(data.id, txt);
     enviados.add(data.id);
@@ -183,7 +198,8 @@ async function poll() {
                 if (mkt.offer > pending.entry + chaseLimit) {
                     res = { ok: false, msg: `Ya se fue (${mkt.offer} > entrada+${chaseLimit.toFixed(2)}). No persigo.` };
                 } else {
-                    res = ejecutarCompra(pending.epic);
+                    const sz = sizeFor(pending.epic, mkt.offer, mkt.minDealSize);
+                    res = ejecutarCompra(pending.epic, sz);
                 }
             } catch (e) { res = { ok: false, msg: "Error validando precio: " + e.message }; }
         }
