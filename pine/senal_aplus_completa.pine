@@ -8,10 +8,10 @@
 // El triángulo A+ aparece SOLO cuando todos los filtros obligatorios pasan.
 // La tabla muestra el estado verde/rojo de cada filtro para decidir rápido.
 //
-// Filtros ajustados por spread Capital.com (~$1,75):
-//   - RSI máximo 62 (antes 64)
-//   - Mom5 mínimo $1,75
-//   - No entrar a < $3 de una resistencia (filtro nuevo)
+// Filtros calibrados por backtest (2026-07-02) — sincronizado con el detector:
+//   - ER 1m ≥ 0,30 (piso duro) · ER 5m ≥ 0,25 · período ER 14
+//   - RSI máximo 70 (antes 62) · Mom5 mínimo 0,6×ATR (antes % del precio)
+//   - VolR ≥ 1,0 (antes 1,20) · No entrar a < $3 de una resistencia
 // =============================================================================
 
 indicator("Señal A+ Completa", shorttitle="A+", overlay=false)
@@ -25,15 +25,16 @@ es_1m = timeframe.period == "1"
 // -----------------------------------------------------------------------------
 
 // --- ER ---
-length_er  = input.int(10,   "Período ER",                minval=2,  group="ER Dual")
-umbral_er  = input.float(0.40, "Umbral ER (1m y 5m)",    step=0.05, group="ER Dual")
+length_er  = input.int(14,   "Período ER",                minval=2,  group="ER Dual")
+umbral_er_1m = input.float(0.30, "Umbral ER 1m",         step=0.05, group="ER Dual")
+umbral_er_5m = input.float(0.25, "Umbral ER 5m",         step=0.05, group="ER Dual")
 tf_5m      = input.timeframe("5", "Timeframe contexto",             group="ER Dual")
 
 // --- Filtros señal A+ ---
 rsi_min    = input.float(50.0, "RSI mínimo",              step=1.0,  group="Filtros A+")
-rsi_max    = input.float(62.0, "RSI máximo (spread adj)", step=1.0,  group="Filtros A+")
-mom5_pct   = input.float(0.11, "Mom5 mínimo (% del precio)", step=0.01, group="Filtros A+")
-volr_min   = input.float(1.20, "VolR mínimo",             step=0.05, group="Filtros A+")
+rsi_max    = input.float(70.0, "RSI máximo (spread adj)", step=1.0,  group="Filtros A+")
+mom5_atr   = input.float(0.6,  "Mom5 mínimo (×ATR)",      step=0.1,  group="Filtros A+")
+volr_min   = input.float(1.0,  "VolR mínimo",             step=0.05, group="Filtros A+")
 volabs_min = input.float(10.0, "VolAbs mínimo (mercado vivo)", step=1.0, group="Filtros A+")
 vwap_bloquea = input.bool(true, "VWAP bloquea la señal (precio debe estar sobre VWAP)", group="Filtros A+")
 
@@ -86,6 +87,7 @@ er_5m_raw = request.security(
 e9_raw  = ta.ema(close, 9)
 e21_raw = ta.ema(close, 21)
 rsi_raw = ta.rsi(close, 14)
+atr14   = ta.atr(14)[1]           // ATR(14) de la vela cerrada, para el umbral de mom5 (×ATR, = detector)
 vwap_raw = ta.vwap(hlc3)
 
 // =============================================================================
@@ -137,10 +139,10 @@ dist_res = na(nearest_res) ? na : nearest_res - precio
 f1_vivo = volabs >= volabs_min
 
 // Filtro 2: ER 1m tendencial (no choppy en la microestructura)
-f2_er1m = er_1m >= umbral_er
+f2_er1m = er_1m >= umbral_er_1m
 
 // Filtro 3: ER 5m tendencial (contexto de mayor temporalidad)
-f3_er5m = er_5m >= umbral_er
+f3_er5m = er_5m >= umbral_er_5m
 
 // Filtro 4: EMA9 sobre EMA21 (estructura alcista)
 f4_alcista = e9 > e21
@@ -148,9 +150,9 @@ f4_alcista = e9 > e21
 // Filtro 5: pullback a EMA9 en las 3 velas previas + rebote (cierre sobre EMA9)
 f5_pullback = (low[2] <= e9[2] or low[3] <= e9[3] or low[4] <= e9[4]) and precio > e9
 
-// Filtro 5b: momentum suficiente para cubrir el spread ($1,75)
-// Umbral de mom5 en % del precio → sirve igual para ETH (~$1.75) y BTC (~$66)
-mom5_umbral = close * mom5_pct / 100
+// Filtro 5b: momentum del rebote medido en ×ATR (igual que el detector, calibrado 2026-07-02).
+// Ojo: pedir MÁS momentum EMPEORA (es perseguir el envión) → el óptimo es 0.6×ATR, no más.
+mom5_umbral = mom5_atr * atr14
 f6_mom5 = mom5 >= mom5_umbral
 
 // Filtro 6: RSI en rango óptimo (con fuerza pero sin sobrecompra)
@@ -181,19 +183,19 @@ nueva_senal = senal_aplus and not senal_aplus[1]
 // -----------------------------------------------------------------------------
 // Colores del ER Dual
 // -----------------------------------------------------------------------------
-col_1m = er_1m >= umbral_er ? color.new(#00FF88, 0)  : color.new(#FF4444, 0)
-col_5m = er_5m >= umbral_er ? color.new(#00BFFF, 40) : color.new(#FF8C00, 40)
+col_1m = er_1m >= umbral_er_1m ? color.new(#00FF88, 0)  : color.new(#FF4444, 0)
+col_5m = er_5m >= umbral_er_5m ? color.new(#00BFFF, 40) : color.new(#FF8C00, 40)
 
 // -----------------------------------------------------------------------------
 // Plots del panel ER
 // -----------------------------------------------------------------------------
 plot(er_1m, "ER 1m", color=col_1m, linewidth=2)
 plot(er_5m, "ER contexto (5m)", color=col_5m, linewidth=1)
-hline(umbral_er, "Umbral A+", color=color.new(color.white, 50),
+hline(umbral_er_1m, "Umbral A+", color=color.new(color.white, 50),
      linestyle=hline.style_dashed, linewidth=1)
 
 // Fondo verde suave cuando ER 1m está activo
-bgcolor(mostrar_fondo and er_1m >= umbral_er ? color.new(#00FF88, 92) : na,
+bgcolor(mostrar_fondo and er_1m >= umbral_er_1m ? color.new(#00FF88, 92) : na,
      title="Fondo ER 1m activo")
 
 // -----------------------------------------------------------------------------
@@ -260,13 +262,13 @@ if mostrar_tabla and barstate.islast
          bgcolor=cell_bg(f1_vivo), text_size=size.small)
 
     // F2: ER 1m
-    table.cell(tbl, 0, 2, "2. ER 1m ≥ " + str.tostring(umbral_er, "0.00"),
+    table.cell(tbl, 0, 2, "2. ER 1m ≥ " + str.tostring(umbral_er_1m, "0.00"),
          text_color=color.white, text_size=size.small)
     table.cell(tbl, 1, 2, cell_txt(f2_er1m, str.tostring(er_1m, "0.00")),
          bgcolor=cell_bg(f2_er1m), text_size=size.small)
 
     // F3: ER 5m
-    table.cell(tbl, 0, 3, "3. ER 5m ≥ " + str.tostring(umbral_er, "0.00"),
+    table.cell(tbl, 0, 3, "3. ER 5m ≥ " + str.tostring(umbral_er_5m, "0.00"),
          text_color=color.white, text_size=size.small)
     table.cell(tbl, 1, 3, cell_txt(f3_er5m, str.tostring(er_5m, "0.00")),
          bgcolor=cell_bg(f3_er5m), text_size=size.small)

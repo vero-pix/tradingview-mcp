@@ -2,8 +2,9 @@
 # Detector de entrada PERMANENTE (servicio launchd). Vigila ETH 24/7 y avisa
 # por Telegram + macOS cuando hay una entrada A+ (5 filtros). Corre indefinido.
 #
-# Filtros: anti-choppy (ER>=0.40) + tendencia (EMA9>EMA21) + pullback a EMA9
-#          + rebote con momentum + RSI 50-64. (El VWAP lo confirma Vero en pantalla.)
+# Filtros: anti-choppy (ER>=0.30 en 1m y >=0.25 en 5m) + tendencia (EMA9>EMA21)
+#          + pullback a EMA9 + rebote con momentum + RSI 50-70. (El VWAP lo confirma
+#          Vero en pantalla.) Calibrado con backtest_aplus_sweep.cjs el 2026-07-02.
 
 NODE="$HOME/.local/share/fnm/aliases/default/bin/node"
 [ -x "$NODE" ] || NODE="$(command -v node)"
@@ -32,7 +33,13 @@ LIQ_MIN="${LIQ_MIN:-50}"                      # volumen absoluto mínimo (asset-
 # uno). Los defaults reproducen la calibración de ETH a volatilidad típica.
 TREND_ATR="${TREND_ATR:-0.25}"                # EMA9-EMA21 >= 0.25×ATR (tendencia sobre el ruido)
 PULLBACK_ATR="${PULLBACK_ATR:-0.5}"           # P-EMA9 <= 0.5×ATR (pullback dentro del ruido)
-MOM5_ATR="${MOM5_ATR:-1.1}"                   # mom5 >= 1.1×ATR (el rebote debe superar el ruido)
+MOM5_ATR="${MOM5_ATR:-0.6}"                   # mom5 >= 0.6×ATR (rebote con momentum, SIN perseguir el envión — ver calibración 2026-07-02)
+# Filtros de calidad, calibrados por instrumento (defaults = ETH, ver backtest_aplus_sweep.cjs 2026-07-02).
+# BTC los sobreescribe en su plist (ER5=0, RSI_HI=74) porque su edge vive en otra zona.
+ER1_MIN="${ER1_MIN:-0.30}"                    # ER 1m mínimo (PISO DURO: bajo 0.30 el edge se muere)
+ER5_MIN="${ER5_MIN:-0.25}"                    # ER 5m mínimo (0 = desactiva el filtro de contexto 5m)
+RSI_HI="${RSI_HI:-70}"                        # techo de RSI de entrada (banda de rebote; sobre esto = perseguir)
+VOLR_MIN="${VOLR_MIN:-1.0}"                   # volr mínimo del rebote (volumen sobre lo normal)
 
 while true; do
   # Datos desde Binance (volumen REAL). El feed de Capital.com en TV no entrega
@@ -73,19 +80,19 @@ while true; do
   LIQ=$("$NODE" -e "console.log($VA>=$LIQ_MIN?1:0)")
   if [ "$LIQ" = "0" ]; then echo "$(date '+%H:%M:%S') mercado muerto sin liquidez (vol=$VA)"; pb=0; sleep 6; continue; fi
 
-  DIR_OK=$("$NODE" -e "console.log($ER>=0.40?1:0)")
+  DIR_OK=$("$NODE" -e "console.log($ER>=$ER1_MIN?1:0)")
   if [ "$DIR_OK" = "0" ]; then echo "$(date '+%H:%M:%S') choppy ER=$ER (régimen $REGIMEN, ATR=$AT)"; pb=0; sleep 6; continue; fi
   TREND=$("$NODE" -e "console.log(($E9-$E21)>=($TREND_ATR*$AT)?1:0)")
   if [ "$TREND" = "0" ]; then echo "$(date '+%H:%M:%S') EMAs planas ER=$ER"; pb=0; sleep 6; continue; fi
   # CONTEXTO 5m (igual que el indicador filtro 3): el marco de 5m también debe ser
-  # tendencial (ER 5m >= 0.40). Solo se consulta acá, cuando el 1m ya viene bien.
+  # tendencial (ER 5m >= 0.25). Solo se consulta acá, cuando el 1m ya viene bien.
   ER5=$(BINANCE_SYMBOL="$SYMBOL" BINANCE_INTERVAL=5m BINANCE_LIMIT=100 "$NODE" scripts/ohlcv_binance.js 2>/dev/null | "$NODE" scripts/calc_indicators.js | cut -d'|' -f7)
-  CTX5=$("$NODE" -e "console.log(($ER5>=0.40)?1:0)")
+  CTX5=$("$NODE" -e "console.log(($ER5_MIN<=0 || $ER5>=$ER5_MIN)?1:0)")
   if [ "$CTX5" = "0" ]; then echo "$(date '+%H:%M:%S') contexto 5m débil (ER5=$ER5)"; pb=0; sleep 6; continue; fi
   NEAR=$("$NODE" -e "console.log(($P-$E9)<=($PULLBACK_ATR*$AT)?1:0)")
   [ "$NEAR" = "1" ] && pb=1
-  # filtro de VOLUMEN: el rebote debe venir con volumen sobre lo normal (volr>=1.2)
-  REB=$("$NODE" -e "console.log(($pb==1 && $M2>=1.0 && $P>=$E9 && $R>=50 && $R<=62 && $M5>=($MOM5_ATR*$AT) && $VR>=1.2)?1:0)")
+  # filtro de VOLUMEN: el rebote debe venir con volumen sobre lo normal (volr>=1.0)
+  REB=$("$NODE" -e "console.log(($pb==1 && $M2>=1.0 && $P>=$E9 && $R>=50 && $R<=$RSI_HI && $M5>=($MOM5_ATR*$AT) && $VR>=$VOLR_MIN)?1:0)")
 
   if [ "$REB" = "1" ] && [ "$cooldown" -eq 0 ]; then
     # Stop = entrada − 2×ATR (volatilidad real). Objetivo = entrada + 2×ATR (RR 1:1, scalp).
