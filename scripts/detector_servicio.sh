@@ -104,6 +104,12 @@ while true; do
     MAX_ENTRY=$("$NODE" -e "console.log(($P+2).toFixed(2))")
     echo "$(date '+%H:%M:%S') >>> ENTRADA p=$P rsi=$R ER=$ER vol=$VR sl=$SL tp=$TP maxEntry=$MAX_ENTRY"
     ./scripts/notify.sh "SEÑAL LONG · $EPIC $P · Vero" "✅ ENTRADA $P | 🛑 STOP $SL | 🎯 OBJETIVO $TP (riesgo \$$RISK). Régimen: $REGIMEN. DIRECCIONAL (ER=$ER) + VOLUMEN ${VR}x, RSI $R. Confirma VWAP. Si pierde el STOP, SAL. NO promedies. ⏰ CADUCA si precio > \$$MAX_ENTRY (no perseguir)." "Hero"
+    # Diario de señales (para el score vs backtest): una línea JSON por señal disparada.
+    # Lo evalúa scripts/senales_score.cjs (¿tocó el TP o el SL primero?) y compara el
+    # win rate REAL contra el esperado del backtest. NO afecta la operación.
+    printf '{"ts":%s,"fecha":"%s","symbol":"%s","epic":"%s","entry":%s,"sl":%s,"tp":%s,"atr":%s,"rsi":%s,"er":%s,"volr":%s,"regimen":"%s"}\n' \
+      "$(( $(date +%s) * 1000 ))" "$(date '+%Y-%m-%d %H:%M:%S')" "$SYMBOL" "$EPIC" "$P" "$SL" "$TP" "$AT" "$R" "$ER" "$VR" "$REGIMEN" \
+      >> "$HOME/Trading/senales_aplus.jsonl"
     # Armar orden (opcional, default OFF): escribe la señal para el bot de Telegram,
     # que le manda a Vero los botones ✅/❌. Se activa con ARM_ORDER=1 en el entorno.
     # NO ejecuta nada acá: el bot ejecuta solo si Vero toca ✅. Precios traducidos a

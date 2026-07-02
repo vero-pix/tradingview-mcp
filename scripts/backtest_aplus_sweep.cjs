@@ -24,6 +24,7 @@ const MIN_DAY = Number(flag("--min-day", "0.5"));   // mínimo señales/día par
 const MAX_DAY = Number(flag("--max-day", "6"));     // máximo (más que esto = ruido / sobre-opera)
 const MIN_PF  = Number(flag("--min-pf", "1.0"));    // mínimo profit factor para mostrar
 const MIN_N   = Number(flag("--min-n", "12"));      // mínimo de trades (muestra chica = ruido, no fiarse)
+const END_H   = Number(flag("--end-hours-ago", "0")); // desplaza la ventana al pasado (walk-forward: calibrar en viejo, validar en nuevo)
 const ATR_MULT = 2;
 const LIQ_MIN = SYMBOL.startsWith("BTC") ? 8 : 50;
 const HOSTS = ["api.binance.com", "data-api.binance.vision", "api1.binance.com"];
@@ -35,7 +36,7 @@ function erCalc(c, N = 14) { const seg = c.slice(-N - 1); const neto = Math.abs(
 function atrCalc(bars) { if (bars.length < 16) return 0; const tr = bars.map((b, i) => i === 0 ? b.high - b.low : Math.max(b.high - b.low, Math.abs(b.high - bars[i - 1].close), Math.abs(b.low - bars[i - 1].close))); let a = tr.slice(1, 15).reduce((s, v) => s + v, 0) / 14; for (let i = 15; i < tr.length; i++) a = (a * 13 + tr[i]) / 14; return a; }
 
 async function fetchKlines() {
-    let all = [], endTime = null;
+    let all = [], endTime = END_H > 0 ? Date.now() - END_H * 3600 * 1000 : null;
     while (all.length < NBARS) {
         const need = Math.min(1000, NBARS - all.length);
         let url = `/api/v3/klines?symbol=${SYMBOL}&interval=1m&limit=${need}`;
