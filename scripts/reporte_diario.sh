@@ -13,7 +13,9 @@ cd "$DIR" || exit 1
 HOUR=$(date +%H)
 if [ "$HOUR" -lt 12 ]; then PREFIJO="☀️ Buenos días Vero — repaso de ayer:"; else PREFIJO="🌙 Cierre del día, Vero:"; fi
 
-REPORTE=$("$NODE" scripts/reporte_diario.js 2>/dev/null)
+# Reporte LEÍDO DIRECTO de Capital.com (API) — ya no depende de bajar CSVs a mano
+REPORTE=$("$NODE" scripts/capital_reporte.cjs 2>/dev/null)
+[ -z "$REPORTE" ] && REPORTE="(No pude leer el historial de Capital ahora.)"
 TEXTO="${PREFIJO}
 ${REPORTE}"
 
