@@ -4,3 +4,6 @@ scripts/current.pine
 temp_*
 *.log
 discovery-log.json
+
+# backups automáticos de zonas
+scripts/zonas_backup_*.env
