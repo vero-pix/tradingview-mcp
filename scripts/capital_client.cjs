@@ -498,7 +498,9 @@ async function closePosition(dealId, { demo = false } = {}) {
 
 /**
  * Modifica el stop/target de una posición abierta (PUT → confirma).
- * Solo cambia lo que se pasa. Usado por el breakeven para SUBIR el stop.
+ * ⚠️ GOTCHA Capital (descubierto 2026-07-02 en real): el PUT REEMPLAZA el bracket
+ * completo — mandar solo stopLevel BORRA el take profit (y viceversa). Por eso,
+ * si falta uno de los dos niveles, se lee la posición y se PRESERVA el vigente.
  * @returns {{ok, dealStatus, reason, dealId}}
  */
 async function updatePosition(dealId, { stopLevel = null, profitLevel = null, demo = false } = {}) {
@@ -509,6 +511,18 @@ async function updatePosition(dealId, { stopLevel = null, profitLevel = null, de
     if (stopLevel   != null) body.stopLevel   = Number(stopLevel);
     if (profitLevel != null) body.profitLevel = Number(profitLevel);
     if (!Object.keys(body).length) throw new Error("updatePosition: nada que cambiar.");
+
+    // preserva el nivel que no viene, para que ningún watcher desarme el bracket
+    if (body.stopLevel == null || body.profitLevel == null) {
+        try {
+            const posiciones = await getPositions({ demo });
+            const p = posiciones.find(x => x.dealId === dealId);
+            if (p) {
+                if (body.stopLevel == null && p.stopLevel != null) body.stopLevel = Number(p.stopLevel);
+                if (body.profitLevel == null && p.limitLevel != null) body.profitLevel = Number(p.limitLevel);
+            }
+        } catch (e) { /* si no se pudo leer, sigue con lo pedido (peor caso = comportamiento anterior) */ }
+    }
 
     const res = await apiCall("PUT", "/api/v1/positions/" + encodeURIComponent(dealId), { demo, body });
     if (isLockError(res)) {
