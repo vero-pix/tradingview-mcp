@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Monitor de señal de continuación (informativo, NO arma orden) como servicio launchd.
+     Instalar:  cp scripts/cl.vero.continuacion.plist ~/Library/LaunchAgents/
+                launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/cl.vero.continuacion.plist -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>cl.vero.continuacion</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>cd "$HOME/Trading/tradingview-mcp" &amp;&amp; N="$HOME/.local/share/fnm/aliases/default/bin/node"; [ -x "$N" ] || N="$(command -v node)"; exec "$N" scripts/continuacion_monitor.cjs</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>INTERVAL</key>
+        <string>30</string>
+        <key>SYMBOL</key>
+        <string>ETHUSDT</string>
+        <key>EPIC</key>
+        <string>ETHUSD</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/vero_continuacion.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/vero_continuacion.log</string>
+</dict>
+</plist>
