@@ -34,6 +34,7 @@ tf_5m      = input.timeframe("5", "Timeframe contexto",             group="ER Du
 rsi_min    = input.float(50.0, "RSI mínimo",              step=1.0,  group="Filtros A+")
 rsi_max    = input.float(70.0, "RSI máximo (spread adj)", step=1.0,  group="Filtros A+")
 mom5_atr   = input.float(0.6,  "Mom5 mínimo (×ATR)",      step=0.1,  group="Filtros A+")
+mom2_min   = input.float(1.0,  "Mom2 mínimo ($, rebote 2 velas)", step=0.5, group="Filtros A+")
 volr_min   = input.float(1.0,  "VolR mínimo",             step=0.05, group="Filtros A+")
 volabs_min = input.float(10.0, "VolAbs mínimo (mercado vivo)", step=1.0, group="Filtros A+")
 vwap_bloquea = input.bool(true, "VWAP bloquea la señal (precio debe estar sobre VWAP)", group="Filtros A+")
@@ -105,6 +106,9 @@ precio = close[1]                 // cierre de la última vela cerrada
 
 // Momentum de 5 velas, ya en barras cerradas (close[1] vs close[6])
 mom5 = close[1] - close[6]
+// Momentum de 2 velas (rebote inmediato): close[1] vs close[3]. Igual que el detector
+// (calc_indicators mom2) — es el filtro que faltaba en el chart y causaba A+ sin gong.
+mom2 = close[1] - close[3]
 
 // Volumen: promedio de las 3 últimas velas cerradas vs promedio de 50
 vol3    = math.avg(volume[1], volume[2], volume[3])
@@ -155,6 +159,10 @@ f5_pullback = (low[2] <= e9[2] or low[3] <= e9[3] or low[4] <= e9[4]) and precio
 mom5_umbral = mom5_atr * atr14
 f6_mom5 = mom5 >= mom5_umbral
 
+// Filtro 5c: momentum del rebote en 2 velas ($ fijo, = detector). El rebote tiene que
+// estar empujando YA, no solo la tendencia de fondo. Este filtro faltaba en el chart.
+f6b_mom2 = mom2 >= mom2_min
+
 // Filtro 6: RSI en rango óptimo (con fuerza pero sin sobrecompra)
 f7_rsi = rsi >= rsi_min and rsi <= rsi_max
 
@@ -171,7 +179,7 @@ f10_resist = na(nearest_res) or dist_res >= dist_eff
 // Señal A+ completa: obligatorios siempre; VWAP y resistencia según switch
 // -----------------------------------------------------------------------------
 base_ok = f1_vivo and f2_er1m and f3_er5m and f4_alcista and
-     f5_pullback and f6_mom5 and f7_rsi and f8_volr
+     f5_pullback and f6_mom5 and f6b_mom2 and f7_rsi and f8_volr
 
 senal_aplus = base_ok and
      (not vwap_bloquea or f9_vwap) and
@@ -278,11 +286,11 @@ if mostrar_tabla and barstate.islast
     table.cell(tbl, 1, 4, f4_alcista ? "✅ alcista" : "❌ bajista",
          bgcolor=cell_bg(f4_alcista), text_size=size.small)
 
-    // F5: Pullback + Mom5
-    table.cell(tbl, 0, 5, "5. Pullback + Mom5 > " + str.tostring(mom5_umbral, "0.00"),
+    // F5: Pullback + Mom5 + Mom2 (rebote de fondo Y empuje inmediato)
+    table.cell(tbl, 0, 5, "5. Pullback + Mom5>" + str.tostring(mom5_umbral, "0.0") + " + Mom2>" + str.tostring(mom2_min, "0.0"),
          text_color=color.white, text_size=size.small)
-    table.cell(tbl, 1, 5, cell_txt(f5_pullback and f6_mom5, str.tostring(mom5, "0.00")),
-         bgcolor=cell_bg(f5_pullback and f6_mom5), text_size=size.small)
+    table.cell(tbl, 1, 5, cell_txt(f5_pullback and f6_mom5 and f6b_mom2, str.tostring(mom5, "0.00") + "/" + str.tostring(mom2, "0.00")),
+         bgcolor=cell_bg(f5_pullback and f6_mom5 and f6b_mom2), text_size=size.small)
 
     // F6: RSI
     table.cell(tbl, 0, 6, "6. RSI " + str.tostring(rsi_min, "0") + "–" + str.tostring(rsi_max, "0"),
