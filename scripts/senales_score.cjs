@@ -84,6 +84,32 @@ async function klinesDesde(symbol, tsMs) {
         console.log(`WR real: ${wr}% (esperado backtest: ${WR_ESPERADO}%) · Neto/u: ${neto >= 0 ? "+" : ""}$${neto.toFixed(2)}`);
     }
 
+    // ---- radar de casi-señales: qué tan cerca estuvo el mercado del A+ (24h) ----
+    const CASI = path.join(process.env.HOME, "Trading", "casi_senales.jsonl");
+    let casiMsg = "";
+    if (fs.existsSync(CASI)) {
+        const todas = fs.readFileSync(CASI, "utf8").split("\n").filter(Boolean)
+            .map(l => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean);
+        // poda a 14 días (el radar escribe cada ~6s cuando hay casi-señal sostenida)
+        const corte = Date.now() - 14 * 86400000;
+        const vivas = todas.filter(c => c.ts >= corte);
+        if (vivas.length !== todas.length) fs.writeFileSync(CASI, vivas.length ? vivas.map(c => JSON.stringify(c)).join("\n") + "\n" : "");
+        const hoy = vivas.filter(c => c.ts >= Date.now() - 24 * 3600000);
+        if (hoy.length) {
+            // agrupa por minuto+símbolo para no contar el mismo momento 10 veces
+            const porMin = new Map();
+            for (const c of hoy) {
+                const k = c.fecha + "|" + c.symbol;
+                const prev = porMin.get(k);
+                if (!prev || c.faltaron.length < prev.faltaron.length) porMin.set(k, c);
+            }
+            const top = [...porMin.values()].sort((a, b) => a.faltaron.length - b.faltaron.length)[0];
+            casiMsg = `\n🔭 Casi-señales (24h): ${porMin.size} momento(s). El más cercano: ${top.fecha.slice(11)} ${top.symbol} — faltó solo ${top.faltaron.join(" y ")}. El sistema está mirando; el gong suena cuando no falte NADA.`;
+        } else {
+            casiMsg = "\n🔭 Sin casi-señales en 24h: el mercado anduvo lejos del setup. El silencio es correcto, no es que el sistema duerma.";
+        }
+    }
+
     let titulo = "Score A+ · Vero", msg, sonido = "Glass";
     if (!res.length) {
         msg = `📊 Score A+ (14d): ${rec.length} señales, ninguna resuelta aún. Sin datos para comparar con el backtest todavía.`;
@@ -96,6 +122,7 @@ async function klinesDesde(symbol, tsMs) {
     } else {
         msg = `🟢 El A+ real rinde según lo esperado: WR ${wr}% (backtest: ${WR_ESPERADO}%), neto ${neto >= 0 ? "+" : ""}$${neto.toFixed(2)}/u en ${res.length} señales (14d). El edge sigue vivo.`;
     }
+    msg += casiMsg;
     console.log("\n" + msg + "\n");
     if (REPORTE) notify(titulo, msg, sonido);
 })();

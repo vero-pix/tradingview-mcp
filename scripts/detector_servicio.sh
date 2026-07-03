@@ -127,6 +127,24 @@ while true; do
     pb=0
   else
     echo "$(date '+%H:%M:%S') p=$P rsi=$R ER=$ER pb=$pb cd=$cooldown"
+    # Radar de casi-señales: si el contexto ya pasó (liquidez/ER/tendencia/5m) y al
+    # rebote le faltaron 1-2 condiciones, deja registro. NO avisa ni suena — solo mide,
+    # para que el reporte diario cuente "qué tan cerca estuvo" (y para detectar si los
+    # filtros quedaron muy apretados). Lo lee scripts/senales_score.cjs.
+    if [ "$cooldown" -eq 0 ]; then
+      NM=$("$NODE" -e "
+        const fal = [];
+        if ($pb != 1) fal.push('pullback');
+        if ($M2 < 1.0) fal.push('mom2');
+        if ($P < $E9) fal.push('sobre-EMA9');
+        if ($R < 50 || $R > $RSI_HI) fal.push('rsi');
+        if ($M5 < ($MOM5_ATR * $AT)) fal.push('mom5');
+        if ($VR < $VOLR_MIN) fal.push('volr');
+        if (fal.length >= 1 && fal.length <= 2)
+          console.log(JSON.stringify({ ts: Date.now(), fecha: '$(date '+%Y-%m-%d %H:%M')', symbol: '$SYMBOL', faltaron: fal, p: $P, rsi: $R, er: $ER, volr: $VR }));
+      " 2>/dev/null)
+      [ -n "$NM" ] && echo "$NM" >> "$HOME/Trading/casi_senales.jsonl"
+    fi
   fi
   sleep 6
 done
