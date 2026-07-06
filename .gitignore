@@ -7,3 +7,7 @@ discovery-log.json
 
 # backups automáticos de zonas
 scripts/zonas_backup_*.env
+
+# credenciales (NUNCA al repo)
+.env
+.env.*

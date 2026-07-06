@@ -13,6 +13,8 @@ cd "$DIR" || exit 1
 
 pb=0
 cooldown=0   # lecturas restantes de silencio tras una alerta (evita spam)
+pcd=0        # cooldown propio del pre-aviso ("se está armando"), independiente del A+
+PREAVISO="${PREAVISO:-1}"  # 1 = mandar pre-aviso suave cuando falta SOLO el gatillo del rebote
 
 # --- Alertas de ZONAS (niveles S/R marcados en scripts/zonas.env) ---
 # Avisan al ACERCARSE o ROMPER tus niveles, INDEPENDIENTE de la señal A+.
@@ -54,6 +56,7 @@ while true; do
   REGIMEN=$([ -n "$P" ] && [ "$P" != "0" ] && "$NODE" -e "const a=($AT/$P*100);console.log(a<0.07?'calmo':(a>0.14?'volátil':'normal'))" 2>/dev/null || echo "?")
 
   [ "$cooldown" -gt 0 ] && cooldown=$((cooldown-1))
+  [ "$pcd" -gt 0 ] && pcd=$((pcd-1))
 
   if [ "$P" = "0" ] || [ -z "$P" ]; then echo "$(date '+%H:%M:%S') sin datos"; sleep 6; continue; fi
 
@@ -72,6 +75,22 @@ while true; do
         echo "$(date '+%H:%M:%S') ZONA: $A"
         ./scripts/notify.sh "Zona ETH" "$A" "$SND"
       done
+    fi
+  fi
+
+  # FRANJA MADRUGADA: el backtest (2026-07-05) mostró que 00-07 Chile fue la franja
+  # floja (WR 50%). Vero decidió operar A+ 24/7, así que el filtro está DESCARTADO
+  # por defecto (MADRUGADA_MODE=off). Se puede reactivar con MADRUGADA_MODE=block
+  # (no arma señal 00-07) o =warn (arma pero con etiqueta de aviso). Default: off.
+  MADRUGADA_MODE="${MADRUGADA_MODE:-off}"
+  MADRUGADA_TAG=""
+  if [ "$MADRUGADA_MODE" != "off" ]; then
+    HORA_CL=$(TZ="America/Santiago" date '+%H')
+    if [ "$HORA_CL" -ge 0 ] 2>/dev/null && [ "$HORA_CL" -le 7 ]; then
+      if [ "$MADRUGADA_MODE" = "block" ]; then
+        echo "$(date '+%H:%M:%S') madrugada (${HORA_CL}h Chile) — señal bloqueada, solo radar"; pb=0; sleep 6; continue
+      fi
+      MADRUGADA_TAG=" ⚠️ MADRUGADA (franja histórica floja WR 50%)"
     fi
   fi
 
@@ -144,6 +163,33 @@ while true; do
           console.log(JSON.stringify({ ts: Date.now(), fecha: '$(date '+%Y-%m-%d %H:%M')', symbol: '$SYMBOL', faltaron: fal, p: $P, rsi: $R, er: $ER, volr: $VR }));
       " 2>/dev/null)
       [ -n "$NM" ] && echo "$NM" >> "$HOME/Trading/casi_senales.jsonl"
+
+      # PRE-AVISO (heads-up suave, 🟡): el contexto ya pasó (liquidez/ER/tendencia/5m)
+      # y el setup está estructurado (hubo pullback) — falta SOLO el gatillo: que el
+      # precio vuelva sobre EMA9 con impulso, o que el RSI entre en banda. NO arma
+      # orden, sonido distinto al A+ (Ping vs Hero). Excluye a propósito pullback/volr/
+      # mom5 como gatillo: si falta uno de esos, NO hay setup todavía (es ruido).
+      if [ "$PREAVISO" = "1" ] && [ "$pcd" -eq 0 ]; then
+        PRE=$("$NODE" -e "
+          const fal=[];
+          if ($pb!=1) fal.push('pullback');
+          if ($M2<1.0) fal.push('mom2');
+          if ($P<$E9) fal.push('sobre-EMA9');
+          if ($R<50||$R>$RSI_HI) fal.push('rsi');
+          if ($M5<($MOM5_ATR*$AT)) fal.push('mom5');
+          if ($VR<$VOLR_MIN) fal.push('volr');
+          const trig=['mom2','sobre-EMA9','rsi'];
+          if(fal.length===1 && trig.includes(fal[0])){
+            if(fal[0]==='rsi') console.log($R>$RSI_HI?('RSI caliente '+($R).toFixed(0)+' — espera que enfríe bajo $RSI_HI, NO persigas'):('RSI bajo 50 ('+($R).toFixed(0)+') — aún sin fuerza para el rebote'));
+            else console.log('falta el gatillo: que vuelva sobre EMA9 con impulso. Todo lo demás alineado — atenta a la pantalla.');
+          }
+        " 2>/dev/null)
+        if [ -n "$PRE" ]; then
+          echo "$(date '+%H:%M:%S') ~ PRE-AVISO: $PRE"
+          ./scripts/notify.sh "🟡 Se está armando · $EPIC $P" "$PRE (ER=$ER, volr=$VR). Esto NO es entrada — es aviso de que está cerca. Espera el ✅ del bot antes de operar." "Ping"
+          pcd=30   # ~3 min de silencio de pre-avisos (evita spam)
+        fi
+      fi
     fi
   fi
   sleep 6

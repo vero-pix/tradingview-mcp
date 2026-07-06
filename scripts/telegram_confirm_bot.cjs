@@ -22,7 +22,7 @@
 const fs   = require("fs");
 const path = require("path");
 const os   = require("os");
-const { execFileSync } = require("child_process");
+const { execFileSync, execSync } = require("child_process");
 const capital = require("./capital_client.cjs");
 
 const HOME = process.env.HOME;
@@ -53,6 +53,35 @@ const EPIC       = process.env.EPIC || "ETHUSD";
 // Exposición objetivo en USD (size × precio). Para ETH, 0.1 ≈ $160. Se usa para
 // escalar el size en OTROS instrumentos (BTC 0.1 = $6000 sería enorme).
 const NOTIONAL   = process.env.BOT_NOTIONAL_USD != null ? Number(process.env.BOT_NOTIONAL_USD) : 160;
+
+// --- TOPES DUROS: hasta ahora `freno` solo AVISABA (sonido/Telegram) pero nada
+// impedía que se abriera la orden igual. Acá el bloqueo es MECÁNICO: si se pasa
+// el tope, el bot RECHAZA el ✅ antes de llamar a capital_order.cjs. Mismos
+// valores por defecto que capital_freno.cjs, para que avisen y bloqueen igual.
+const MAX_POS       = process.env.MAX_POS != null ? Number(process.env.MAX_POS) : 2;
+const DAILY_MAX_LOSS = process.env.DAILY_MAX_LOSS != null ? Number(process.env.DAILY_MAX_LOSS) : 20;
+const ACCOUNT_CB    = process.env.ACCOUNT || "USD 2";
+
+// Devuelve null si puede operar, o un string con el motivo del bloqueo.
+async function chequearTopesDuros() {
+    try {
+        await capital.selectAccount(ACCOUNT_CB, { demo: MODE === "DEMO" });
+        const positions = await capital.getPositions({ demo: MODE === "DEMO" });
+        if ((positions || []).length >= MAX_POS) {
+            return `🔴 TOPE DURO: ya tienes ${positions.length} posiciones abiertas (máx ${MAX_POS}). No abro otra — cierra o espera antes de sumar riesgo.`;
+        }
+        const r = await capital.apiCall("GET", "/api/v1/history/transactions?lastPeriod=86400", { demo: MODE === "DEMO" });
+        const tx = ((r.data && r.data.transactions) || []).filter(t => t.transactionType === "TRADE" && /clos/i.test(t.note || ""));
+        const netHoy = tx.reduce((s, t) => s + Number(t.size), 0);
+        if (netHoy <= -DAILY_MAX_LOSS) {
+            return `🔴 TOPE DURO: pérdida del día ya en $${netHoy.toFixed(2)} (límite -$${DAILY_MAX_LOSS}). Se acabó operar por hoy — mañana con la cabeza fresca.`;
+        }
+        return null;
+    } catch (e) {
+        // si no se puede verificar, MEJOR bloquear que operar a ciegas
+        return `⚠️ No pude verificar los topes (${e.message}) — por seguridad, no ejecuto. Reintenta o revisa a mano.`;
+    }
+}
 
 // Tamaño por instrumento: BOT_SIZE_<EPIC> fija; ETHUSD usa SIZE; otros = notional/precio.
 function sizeFor(epic, price, minDeal) {
@@ -92,6 +121,96 @@ async function sendButtons(id, text) {
         { text: "✅ Comprar", callback_data: "buy:" + id },
         { text: "❌ Paso",    callback_data: "skip:" + id },
     ]]}});
+}
+
+// -----------------------------------------------------------------------------
+// Comando "estado": lee el A+ de ETH en vivo (mismos datos y umbrales que el
+// detector) y devuelve un resumen para el celular. NO dispara nada, solo informa.
+// -----------------------------------------------------------------------------
+function num(x, d = 2) { return Number(x).toFixed(d).replace(".", ","); }
+function estadoAplus() {
+    let v1, v5;
+    try {
+        v1 = execSync(`BINANCE_SYMBOL=ETHUSDT BINANCE_INTERVAL=1m BINANCE_LIMIT=100 "${NODE}" scripts/ohlcv_binance.js | "${NODE}" scripts/calc_indicators.js`, { cwd: DIR, shell: "/bin/bash" }).toString().trim().split("\n").pop();
+        v5 = execSync(`BINANCE_SYMBOL=ETHUSDT BINANCE_INTERVAL=5m BINANCE_LIMIT=100 "${NODE}" scripts/ohlcv_binance.js | "${NODE}" scripts/calc_indicators.js`, { cwd: DIR, shell: "/bin/bash" }).toString().trim().split("\n").pop();
+    } catch (e) { return "⚠️ No pude leer los datos ahora. Intenta de nuevo en unos segundos."; }
+    const [P, E9, E21, R, M5, M2, ER, VR, VA, AT] = v1.split("|").map(Number);
+    const ER5 = Number(v5.split("|")[6]);
+    const capBuy = P + 1.75;   // ask Capital ≈ Binance + spread
+    let verd;
+    if (VA < 50)            verd = "🔕 Mercado muerto (sin liquidez) — nada que hacer.";
+    else if (ER < 0.30)     verd = "🔕 Choppy — sin tendencia clara en 1m. Espera.";
+    else if (E9 <= E21)     verd = "🔕 No es alcista (EMA9 bajo EMA21). Solo vamos LONG.";
+    else if (ER5 < 0.25)    verd = "🟠 1m con rumbo, pero 5m sin fuerza (contexto débil). Aún no.";
+    else {
+        const falta = [];
+        if (R < 50 || R > 70)     falta.push(R > 70 ? `que el RSI enfríe (${num(R,0)})` : `RSI bajo (${num(R,0)})`);
+        if ((P - E9) > 0.5 * AT)  falta.push("un pullback al EMA9");
+        if (VR < 1.0)             falta.push(`más volumen (volr ${num(VR)})`);
+        if (M5 < 0.6 * AT)        falta.push("impulso del rebote");
+        verd = falta.length === 0
+            ? "🟢 ALINEADO — todo en su lugar. Si arma, te llega la señal con botones ✅/❌."
+            : "🟡 Se está armando. Falta: " + falta.join(", ") + ".";
+    }
+    return `📊 <b>ETH $${num(P)}</b> (Binance)\n`
+         + `En Capital comprar ≈ $${num(capBuy)}\n\n`
+         + `RSI ${num(R,0)} · ER1 ${num(ER)} · ER5 ${num(ER5)}\n`
+         + `EMA9 ${E9 > E21 ? "▲ sobre" : "▼ bajo"} EMA21 · volr ${num(VR)} · vol ${num(VA,0)}\n\n`
+         + verd;
+}
+
+function fmt(n) { return (n >= 0 ? "+" : "") + Number(n).toFixed(2); }
+
+// Lee la última línea de indicadores de un símbolo: [P,E9,E21,R,M5,M2,ER,VR,VA,AT]
+function indicadores(symbol, interval = "1m") {
+    const out = execSync(`BINANCE_SYMBOL=${symbol} BINANCE_INTERVAL=${interval} BINANCE_LIMIT=100 "${NODE}" scripts/ohlcv_binance.js | "${NODE}" scripts/calc_indicators.js`, { cwd: DIR, shell: "/bin/bash" }).toString().trim().split("\n").pop();
+    return out.split("|").map(Number);
+}
+
+// Comando "btc": lectura de Bitcoin (informativo, no arma orden).
+function estadoBTC() {
+    try {
+        const [P, E9, E21, R, M5, M2, ER, VR] = indicadores("BTCUSDT");
+        const ER5 = indicadores("BTCUSDT", "5m")[6];
+        return `📊 <b>BTC $${num(P, 1)}</b> (informativo)\n`
+             + `RSI ${num(R, 0)} · ER1 ${num(ER)} · ER5 ${num(ER5)}\n`
+             + `EMA9 ${E9 > E21 ? "▲ sobre" : "▼ bajo"} EMA21 · volr ${num(VR)}\n\n`
+             + `ℹ️ BTC es informativo — no arma orden. Su edge es marginal y el spread se lo come.`;
+    } catch (e) { return "⚠️ No pude leer BTC ahora."; }
+}
+
+// Comando "posicion": ¿hay algo abierto en Capital y cómo va?
+async function posicionCapital() {
+    try {
+        const { positions, pnl } = await capital.getEthPosition({ demo: false, epic: "ETHUSD", account: "USD 2" });
+        if (!positions.length) return "📭 Sin posiciones abiertas en ETH (Capital).";
+        return `📈 <b>${pnl.count} lote(s) ETH abiertos</b>\n`
+             + `Entrada prom: ${pnl.weightedAvgEntry}\n`
+             + `P&L: ${fmt(pnl.unrealizedPnl)} USD (${fmt(pnl.pnlPct)}%)\n`
+             + `Bid ahora: ${pnl.bid}`
+             + (pnl.count > 2 ? `\n\n⚠️ ${pnl.count} lotes — pasaste el máx sano (2). Cuidado con sobre-operar.` : "");
+    } catch (e) { return "⚠️ No pude leer tu posición: " + e.message; }
+}
+
+// Comando "reporte": resumen del día (reusa capital_reporte.cjs).
+function reporteDia() {
+    try { return execSync(`"${NODE}" scripts/capital_reporte.cjs`, { cwd: DIR }).toString().trim(); }
+    catch (e) { return "⚠️ No pude generar el reporte ahora."; }
+}
+
+// Comando "zonas": niveles S/R vigentes, relativos al precio actual.
+function zonasStr() {
+    try {
+        const txt = fs.readFileSync(path.join(DIR, "scripts", "zonas.env"), "utf8");
+        const m = txt.match(/ZONAS="([^"]+)"/);
+        if (!m) return "No hay zonas configuradas.";
+        const niveles = m[1].split(",").map(Number).sort((a, b) => b - a);
+        const P = indicadores("ETHUSDT")[0];
+        let t = `🗺️ <b>Zonas S/R ETH</b> (precio ${num(P)})`;
+        for (const z of niveles) t += `\n${num(z)}  ${z > P ? "🔴 resist." : "🟢 soporte"}  (${z > P ? "+" : ""}${num(z - P)})`;
+        if (niveles.every(z => z < P) || niveles.every(z => z > P)) t += `\n\n⚠️ Todas quedaron a un lado — quizás hay que refrescar las zonas.`;
+        return t;
+    } catch (e) { return "⚠️ No pude leer las zonas."; }
 }
 
 // -----------------------------------------------------------------------------
@@ -155,10 +274,30 @@ let offset = 0;
 const manejados = new Set();
 
 async function poll() {
-    const upd = await tg("getUpdates", { offset, timeout: 8, allowed_updates: ["callback_query"] });
+    const upd = await tg("getUpdates", { offset, timeout: 8, allowed_updates: ["callback_query", "message"] });
     if (!upd.ok) { console.log(`${ts()} getUpdates error`); await capital.sleep(2000); return; }
     for (const u of upd.result || []) {
         offset = u.update_id + 1;
+
+        // Comando de texto "estado" (solo el chat de Vero): responde la lectura del A+.
+        if (u.message && u.message.text) {
+            if (String(u.message.chat.id) !== String(CHAT)) continue;
+            const t = u.message.text.trim().toLowerCase().replace(/^\//, "");
+            let respuesta = null;
+            if (t === "estado" || t === "status" || t === "eth")        respuesta = estadoAplus();
+            else if (t === "btc" || t === "bitcoin")                    respuesta = estadoBTC();
+            else if (t === "posicion" || t === "posición" || t === "pos") respuesta = await posicionCapital();
+            else if (t === "reporte" || t === "report")                respuesta = reporteDia();
+            else if (t === "zonas" || t === "zona")                     respuesta = zonasStr();
+            else if (t === "ayuda" || t === "help" || t === "comandos") respuesta = "🤖 Comandos: <b>estado</b> · <b>btc</b> · <b>posicion</b> · <b>reporte</b> · <b>zonas</b>";
+            if (respuesta) {
+                console.log(`${ts()} 💬 comando ${t}`);
+                try { await tg("sendMessage", { chat_id: CHAT, text: respuesta, parse_mode: "HTML" }); }
+                catch (e) { console.log(`${ts()} err ${t}: ${e.message}`); }
+            }
+            continue;
+        }
+
         const cq = u.callback_query;
         if (!cq) continue;
         if (String(cq.message.chat.id) !== String(CHAT)) {
@@ -179,6 +318,18 @@ async function poll() {
 
         await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Verificando..." });
         console.log(`${ts()} ✅ COMPRAR (id ${id}) — modo ${MODE}`);
+
+        // TOPES DUROS: se chequean ANTES de cualquier otra cosa, incluso antes de
+        // mirar la ventana/precio. Si un tope está pasado, no se ejecuta — punto.
+        if (!test && (MODE === "LIVE" || MODE === "DEMO")) {
+            const bloqueo = await chequearTopesDuros();
+            if (bloqueo) {
+                await tg("editMessageText", { chat_id: CHAT, message_id: cq.message.message_id, text: cq.message.text + "\n\n" + bloqueo });
+                console.log(`${ts()}   → BLOQUEADO por tope duro: ${bloqueo}`);
+                pendings.delete(id);
+                continue;
+            }
+        }
 
         const pend = pendings.get(id);
         let res;

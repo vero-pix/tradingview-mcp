@@ -86,11 +86,30 @@ function notify(title, msg, sound) {
         lineas.push(leccion);
         const texto = lineas.join("\n");
 
-        console.log("\n" + texto + "\n");
+        // --- Historial estructurado para racha (no cambia el cálculo del reporte de arriba) ---
+        const fs = require("fs");
+        const HIST_FILE = path.join(HOME, "Trading", "reporte_diario.jsonl");
+        let racha = "";
+        try {
+            fs.appendFileSync(HIST_FILE, JSON.stringify({ fecha: new Date().toISOString(), n, wr, net: Number(net.toFixed(2)) }) + "\n");
+            const hist = fs.readFileSync(HIST_FILE, "utf8").trim().split("\n").filter(Boolean).map(l => JSON.parse(l));
+            // racha: entradas consecutivas (desde la más reciente) con el mismo signo de neto, ignorando las de n=0 (no operó)
+            const conTrades = hist.filter(h => h.n > 0);
+            if (conTrades.length >= 3) {
+                const signo = h => h.net > 0 ? 1 : (h.net < 0 ? -1 : 0);
+                const ultimo = signo(conTrades[conTrades.length - 1]);
+                let cnt = 0;
+                for (let i = conTrades.length - 1; i >= 0 && signo(conTrades[i]) === ultimo; i--) cnt++;
+                if (cnt >= 3) racha = ultimo > 0 ? `🔥 Racha: ${cnt} reportes seguidos en verde.` : `⚠️ Racha: ${cnt} reportes seguidos en rojo — buen momento para pausar y revisar, no para forzar.`;
+            }
+        } catch (e) { /* el historial es un plus, no bloquea el reporte si falla */ }
+
+        const textoFinal = racha ? texto + "\n\n" + racha : texto;
+        console.log("\n" + textoFinal + "\n");
 
         if (SEND) {
             const sound = net > 0 ? "Hero" : (net < 0 ? "Basso" : "Glass");
-            notify("📊 Reporte de trading", texto, sound);
+            notify("📊 Reporte de trading", textoFinal, sound);
             console.log("(enviado por Telegram/macOS)");
         }
     } catch (err) {

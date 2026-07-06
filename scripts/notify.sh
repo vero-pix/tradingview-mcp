@@ -7,8 +7,13 @@ TITLE="${1:?Falta título}"
 MSG="${2:?Falta mensaje}"
 SOUND="${3:-Hero}"
 
-# 1) Notificación macOS con sonido
+# 1) Notificación macOS (visual)
 osascript -e "display notification \"$MSG\" with title \"$TITLE\" sound name \"$SOUND\"" 2>/dev/null
+
+# 1b) Sonido DIRECTO por los parlantes (afplay). El sonido de la notificación de
+# arriba lo silencia el Modo Concentración/No molestar; afplay suena igual, siempre.
+SND_FILE="/System/Library/Sounds/${SOUND}.aiff"
+[ -f "$SND_FILE" ] && command -v afplay >/dev/null 2>&1 && afplay "$SND_FILE" >/dev/null 2>&1 &
 
 # 2) Telegram (si está configurado)
 ENV_FILE="$HOME/Trading/.env.telegram"
