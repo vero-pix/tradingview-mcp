@@ -194,8 +194,15 @@ async function cmdBuy() {
         : price;
     console.log(grn(`\n✅ COMPRA ${fillQty} ${BASE} @ ~${fillPx.toFixed(2)} (orderId ${buyRes.orderId})`));
 
-    // 2) OCO de venta (stop + take-profit) por la cantidad realmente comprada
-    const sellQty = bn.roundStep(fillQty, rules.stepSize);
+    // 2) OCO de venta (stop + take-profit). Binance cobra la comisión de la compra
+    // EN ETH (si no pagas con BNB), así que el balance real queda por debajo de
+    // fillQty → si vendes fillQty exacto, el OCO falla con "insufficient balance".
+    // Se descuenta la comisión cobrada en el asset base y se redondea hacia abajo.
+    let comBase = 0;
+    if (buyRes.fills) for (const f of buyRes.fills) {
+        if (f.commissionAsset === BASE) comBase += Number(f.commission || 0);
+    }
+    const sellQty = bn.roundStep(fillQty - comBase, rules.stepSize);
     let oco;
     try { oco = await bn.placeOcoSell(SYMBOL, sellQty, { tp: target, stop }); }
     catch (e) {

@@ -22,8 +22,9 @@
 const fs   = require("fs");
 const path = require("path");
 const os   = require("os");
-const { execFileSync, execSync } = require("child_process");
+const { execFileSync, execSync, execFile } = require("child_process");
 const capital = require("./capital_client.cjs");
+const binance = require("./binance_client.cjs");
 
 const HOME = process.env.HOME;
 const DIR  = path.join(HOME, "Trading", "tradingview-mcp");
@@ -192,6 +193,53 @@ async function posicionCapital() {
     } catch (e) { return "⚠️ No pude leer tu posición: " + e.message; }
 }
 
+// Comando "binance": posición spot en Binance (donde opera el auto), P&L, protección OCO
+// y si la auto-ejecución está encendida. Cierra el hueco de "posicion" (que solo ve Capital).
+async function estadoBinance() {
+    try {
+        const SYM = "ETHUSDT", B = "ETH";
+        const [rules, balances, open, price] = await Promise.all([
+            binance.getSymbolRules(SYM), binance.getBalances(), binance.getOpenOrders(SYM), binance.getPrice(SYM),
+        ]);
+        const eth  = balances.find(b => b.asset === B)      || { free: 0, locked: 0 };
+        const usdt = balances.find(b => b.asset === "USDT") || { free: 0 };
+        const qty  = Number(eth.free) + Number(eth.locked);
+        const sells = (open || []).filter(o => o.side === "SELL");
+        const stopO = sells.find(o => /STOP/.test(o.type));
+        const tpO   = sells.find(o => /LIMIT/.test(o.type) && !/STOP/.test(o.type));
+
+        let t = `🟡 <b>Binance (spot)</b>\nEfectivo: ${num(Number(usdt.free))} USDT\n`;
+        if (qty < rules.minQty) {
+            t += "Sin posición ETH abierta.";
+        } else {
+            let entry = null;
+            try {
+                const tr = await binance.getMyTrades(SYM, 50);
+                let acc = 0, cost = 0;
+                for (let i = tr.length - 1; i >= 0 && acc < qty; i--) {
+                    if (!tr[i].isBuyer) continue;
+                    const take = Math.min(Number(tr[i].qty), qty - acc);
+                    acc += take; cost += take * Number(tr[i].price);
+                }
+                entry = acc > 0 ? cost / acc : null;
+            } catch (e) {}
+            const val = qty * price;
+            t += `Posición: ${qty.toFixed(5)} ${B} (~$${val.toFixed(2)})\n`;
+            if (entry != null) t += `Entrada ~${num(entry)} · precio ${num(price)}\n`;
+            if (entry != null) t += `P&L: ${fmt((price - entry) * qty)} USD\n`;
+            t += (stopO || tpO)
+                ? `🛡️ Protegida: ${stopO ? "stop " + num(Number(stopO.stopPrice || stopO.price)) : "sin stop"}${tpO ? " / TP " + num(Number(tpO.price)) : ""}`
+                : `🔴 DESNUDA (sin stop/TP) — el guardián se lo pone en segundos`;
+            t += `\nTotal cuenta: ~$${(Number(usdt.free) + val).toFixed(2)}`;
+        }
+        try {
+            const st = execSync("systemctl is-active vero-binanceautoexec", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+            t += `\n⚡ Auto-ejecución: ${st === "active" ? "ON" : "OFF"}`;
+        } catch (e) {}
+        return t;
+    } catch (e) { return "⚠️ No pude leer Binance: " + e.message; }
+}
+
 // Comando "reporte": resumen del día (reusa capital_reporte.cjs).
 function reporteDia() {
     try { return execSync(`"${NODE}" scripts/capital_reporte.cjs`, { cwd: DIR }).toString().trim(); }
@@ -211,6 +259,76 @@ function zonasStr() {
         if (niveles.every(z => z < P) || niveles.every(z => z > P)) t += `\n\n⚠️ Todas quedaron a un lado — quizás hay que refrescar las zonas.`;
         return t;
     } catch (e) { return "⚠️ No pude leer las zonas."; }
+}
+
+// -----------------------------------------------------------------------------
+// Comandos de aprendizaje: score · casi · horas · recalibrar · salí · nota
+// El modelo SE MIDE solo pero NO se recalibra solo (la decisión es de Vero+Claude).
+// -----------------------------------------------------------------------------
+
+// Hora de Chile en formato "YYYY-MM-DD HH:mm:ss" (sv-SE da ese orden ISO).
+function ahoraChile() { return new Date().toLocaleString("sv-SE", { timeZone: "America/Santiago" }); }
+function horaChile(tsMs) { return new Date(tsMs).toLocaleTimeString("es-CL", { timeZone: "America/Santiago", hour: "2-digit", minute: "2-digit" }); }
+function escHtml(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+
+// Etiquetas legibles de qué filtro faltó (para "casi").
+const FALTA_LBL = { mom5: "impulso", volr: "volumen", rsi: "RSI", pullback: "pullback", er: "tendencia 1m", er5: "contexto 5m" };
+
+// Corre un script pesado en BACKGROUND (no congela el poll) y manda su salida a
+// Telegram al terminar. `sliceDesde`: recorta el stdout desde esa marca (quita ruido).
+function correrYMandar(label, cmd, args, sliceDesde) {
+    execFile(cmd, args, { cwd: DIR, maxBuffer: 12 * 1024 * 1024 }, (err, stdout) => {
+        let out = String(stdout || "");
+        if (sliceDesde) { const i = out.indexOf(sliceDesde); if (i >= 0) out = out.slice(i); }
+        out = out.trim();
+        const texto = out ? `<pre>${escHtml(out.slice(0, 3500))}</pre>` : `⚠️ No pude generar ${label} ahora.`;
+        console.log(`${ts()} 💬 ${label} → respondido${err ? " (con error)" : ""}`);
+        tg("sendMessage", { chat_id: CHAT, text: texto, parse_mode: "HTML" }).catch(() => {});
+    });
+}
+
+// Comando "casi": resumen de casi-señales de las últimas 24h (radar del detector).
+// Filtra por `ts` epoch (inequívoco); muestra la hora en Chile.
+function casiSenales() {
+    try {
+        const f = path.join(HOME, "Trading", "casi_senales.jsonl");
+        if (!fs.existsSync(f)) return "🔭 Aún no hay registro de casi-señales.";
+        const desde = Date.now() - 24 * 3600 * 1000;
+        const rows = [];
+        for (const l of fs.readFileSync(f, "utf8").trim().split("\n")) {
+            try { const o = JSON.parse(l); if (o.ts >= desde) rows.push(o); } catch (e) {}
+        }
+        if (!rows.length) return "🔭 Sin casi-señales en 24h. Mercado sin setups cercanos.";
+        const conteo = {};
+        for (const r of rows) for (const x of (r.faltaron || [])) conteo[x] = (conteo[x] || 0) + 1;
+        rows.sort((a, b) => b.ts - a.ts);
+        const masCerca = rows.filter(r => (r.faltaron || []).length === 1)[0] || rows[0];
+        const faltasTxt = Object.entries(conteo).sort((a, b) => b[1] - a[1])
+            .map(([k, n]) => `${FALTA_LBL[k] || k} (${n})`).join(" · ");
+        const faltoCerca = (masCerca.faltaron || []).map(x => FALTA_LBL[x] || x).join(", ") || "nada";
+        return `🔭 <b>Casi-señales (24h): ${rows.length}</b>\n`
+             + `La más cerca: ${horaChile(masCerca.ts)} ${String(masCerca.symbol).replace("USDT", "")} — faltó <b>${faltoCerca}</b>\n`
+             + `Lo que falta más seguido: ${faltasTxt}\n\n`
+             + `ℹ️ El gong suena solo cuando no falta NADA. Esto mide cuán cerca estuvo.`;
+    } catch (e) { return "⚠️ No pude leer las casi-señales."; }
+}
+
+// Comando "salí 1794": registra una salida hecha a mano (para diario + score).
+const DIARIO_MANUAL = path.join(HOME, "Trading", "diario_manual.jsonl");
+function registrarSalida(textoOriginal) {
+    const m = String(textoOriginal).match(/([0-9]+(?:[.,][0-9]+)?)/);
+    if (!m) return "Escríbelo así: <b>salí 1794</b> (el precio al que saliste).";
+    const precio = Number(m[1].replace(",", "."));
+    fs.appendFileSync(DIARIO_MANUAL, JSON.stringify({ ts: Date.now(), fecha: ahoraChile(), tipo: "salida", precio }) + "\n");
+    return `🔴 Salida registrada a <b>$${num(precio)}</b> · ${ahoraChile().slice(0, 16)}\nQueda en tu diario. 👍`;
+}
+
+// Comando "nota ...": guarda el porqué de un trade (data que enseña).
+function registrarNota(textoOriginal) {
+    const nota = String(textoOriginal).replace(/^\s*\/?nota\b\s*/i, "").trim();
+    if (!nota) return "Escríbelo así: <b>nota perseguí el envión</b>.";
+    fs.appendFileSync(DIARIO_MANUAL, JSON.stringify({ ts: Date.now(), fecha: ahoraChile(), tipo: "nota", texto: nota }) + "\n");
+    return `📝 Nota guardada: “${escHtml(nota)}”`;
 }
 
 // -----------------------------------------------------------------------------
@@ -287,9 +405,30 @@ async function poll() {
             if (t === "estado" || t === "status" || t === "eth")        respuesta = estadoAplus();
             else if (t === "btc" || t === "bitcoin")                    respuesta = estadoBTC();
             else if (t === "posicion" || t === "posición" || t === "pos") respuesta = await posicionCapital();
-            else if (t === "reporte" || t === "report")                respuesta = reporteDia();
+            else if (t === "binance" || t === "bnb" || t === "bn")      respuesta = await estadoBinance();
+            else if (t === "reporte" || t === "report")                respuesta = await estadoBinance();
             else if (t === "zonas" || t === "zona")                     respuesta = zonasStr();
-            else if (t === "ayuda" || t === "help" || t === "comandos") respuesta = "🤖 Comandos: <b>estado</b> · <b>btc</b> · <b>posicion</b> · <b>reporte</b> · <b>zonas</b>";
+            else if (t === "casi" || t === "cerca")                     respuesta = casiSenales();
+            else if (t === "score" || t === "puntaje") {
+                respuesta = "🎯 Midiendo el A+ real vs. el backtest…";
+                correrYMandar("score", NODE, ["scripts/senales_score.cjs"], "════ SCORE");
+            }
+            else if (t === "horas" || t === "hora") {
+                respuesta = "⏰ Corriendo el backtest por horas (~20s)…";
+                correrYMandar("horas", NODE, ["scripts/backtest_horas.cjs"], "════ GLOBAL");
+            }
+            else if (t === "recalibrar" || t === "recalibra") {
+                respuesta = "⚖️ Corriendo la revisión de la config… te llega el veredicto en ~1 min.";
+                execFile("/bin/bash", ["scripts/recalibracion_semanal.sh"], { cwd: DIR, maxBuffer: 12 * 1024 * 1024 }, () => {});
+            }
+            else if (/^sal[ií]\b/.test(t))                              respuesta = registrarSalida(u.message.text);
+            else if (/^nota\b/.test(t))                                 respuesta = registrarNota(u.message.text);
+            else if (t === "ayuda" || t === "help" || t === "comandos")
+                respuesta = "🤖 <b>Comandos</b>\n"
+                    + "📊 <b>estado</b> · <b>btc</b> · <b>binance</b> · <b>reporte</b> (Binance) · <b>zonas</b>\n"
+                    + "🎯 <b>score</b> — rinde vs backtest · 🔭 <b>casi</b> — casi-señales de hoy\n"
+                    + "⏰ <b>horas</b> — mejores horas · ⚖️ <b>recalibrar</b> — revisa la config\n"
+                    + "🔴 <b>salí 1794</b> — registra una salida · 📝 <b>nota …</b> — deja el porqué";
             if (respuesta) {
                 console.log(`${ts()} 💬 comando ${t}`);
                 try { await tg("sendMessage", { chat_id: CHAT, text: respuesta, parse_mode: "HTML" }); }

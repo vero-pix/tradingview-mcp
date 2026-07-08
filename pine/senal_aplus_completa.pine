@@ -43,10 +43,11 @@ vwap_bloquea = input.bool(true, "VWAP bloquea la señal (precio debe estar sobre
 // Deja en 0 las que no uses. El precio debe estar al menos 'dist_min' por debajo
 // de la resistencia más cercana ARRIBA, o el spread se come la ganancia.
 // Defaults = zonas autodetectadas 2026-07-01 en precio Capital.com (Binance −~3):
-// 1575 (techo fuerte, 9 toques), 1580, 1585. Actualízalas cuando cambie el rango.
-res1     = input.float(1575.0, "Resistencia 1 ETH ($)", group="Resistencias ETH")
-res2     = input.float(1580.0, "Resistencia 2 ETH ($)", group="Resistencias ETH")
-res3     = input.float(1585.0, "Resistencia 3 ETH ($)", group="Resistencias ETH")
+// 2026-07-06: ETH en máximos ~$1.790 (rompiendo al alza, sin R histórica encima).
+// Resistencias = redondos psicológicos por arriba. Actualízalas cuando cambie el rango.
+res1     = input.float(1800.0, "Resistencia 1 ETH ($)", group="Resistencias ETH")
+res2     = input.float(1810.0, "Resistencia 2 ETH ($)", group="Resistencias ETH")
+res3     = input.float(1825.0, "Resistencia 3 ETH ($)", group="Resistencias ETH")
 dist_min = input.float(3.0, "Distancia mínima a resistencia ($)", step=0.5, group="Resistencias ETH")
 // Resistencias de BTC (se usan solas cuando el chart es un símbolo con "BTC")
 res1_btc = input.float(60285.0, "Resistencia 1 BTC ($)", group="Resistencias BTC")

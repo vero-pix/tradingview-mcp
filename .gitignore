@@ -11,3 +11,5 @@ scripts/zonas_backup_*.env
 # credenciales (NUNCA al repo)
 .env
 .env.*
+scripts/zonas.env.bak_*
+scripts/zonas.env.backup_*

@@ -42,6 +42,12 @@ ER1_MIN="${ER1_MIN:-0.30}"                    # ER 1m mínimo (PISO DURO: bajo 0
 ER5_MIN="${ER5_MIN:-0.25}"                    # ER 5m mínimo (0 = desactiva el filtro de contexto 5m)
 RSI_HI="${RSI_HI:-70}"                        # techo de RSI de entrada (banda de rebote; sobre esto = perseguir)
 VOLR_MIN="${VOLR_MIN:-1.0}"                   # volr mínimo del rebote (volumen sobre lo normal)
+# --- Knobs para SHADOW-TEST (defaults = comportamiento idéntico al real) ---
+RSI_LO="${RSI_LO:-50}"                         # piso de RSI de entrada (default 50)
+SIG_FILE="${SIG_FILE:-$HOME/Trading/senales_aplus.jsonl}"   # dónde registrar señales A+
+CASI_FILE="${CASI_FILE:-$HOME/Trading/casi_senales.jsonl}"  # dónde registrar casi-señales
+SILENT="${SILENT:-0}"                          # 1 = shadow: NO manda alertas Telegram/macOS
+notify_maybe() { [ "${SILENT:-0}" = "1" ] || ./scripts/notify.sh "$@"; }
 
 while true; do
   # Datos desde Binance (volumen REAL). El feed de Capital.com en TV no entrega
@@ -73,7 +79,7 @@ while true; do
         # ruptura al alza = verde (Hero), a la baja = rojo (Basso), proximidad = info (Glass)
         case "$A" in *ALZA*) SND=Hero;; *BAJA*) SND=Basso;; *) SND=Glass;; esac
         echo "$(date '+%H:%M:%S') ZONA: $A"
-        ./scripts/notify.sh "Zona ETH" "$A" "$SND"
+        notify_maybe "Zona ETH" "$A" "$SND"
       done
     fi
   fi
@@ -111,7 +117,7 @@ while true; do
   NEAR=$("$NODE" -e "console.log(($P-$E9)<=($PULLBACK_ATR*$AT)?1:0)")
   [ "$NEAR" = "1" ] && pb=1
   # filtro de VOLUMEN: el rebote debe venir con volumen sobre lo normal (volr>=1.0)
-  REB=$("$NODE" -e "console.log(($pb==1 && $M2>=1.0 && $P>=$E9 && $R>=50 && $R<=$RSI_HI && $M5>=($MOM5_ATR*$AT) && $VR>=$VOLR_MIN)?1:0)")
+  REB=$("$NODE" -e "console.log(($pb==1 && $M2>=1.0 && $P>=$E9 && $R>=$RSI_LO && $R<=$RSI_HI && $M5>=($MOM5_ATR*$AT) && $VR>=$VOLR_MIN)?1:0)")
 
   if [ "$REB" = "1" ] && [ "$cooldown" -eq 0 ]; then
     # Stop = entrada − 2×ATR (volatilidad real). Objetivo = entrada + 2×ATR (RR 1:1, scalp).
@@ -122,13 +128,13 @@ while true; do
     # porque el ratio riesgo/beneficio se invierte (el target queda muy cerca y el stop lejos).
     MAX_ENTRY=$("$NODE" -e "console.log(($P+2).toFixed(2))")
     echo "$(date '+%H:%M:%S') >>> ENTRADA p=$P rsi=$R ER=$ER vol=$VR sl=$SL tp=$TP maxEntry=$MAX_ENTRY"
-    ./scripts/notify.sh "SEÑAL LONG · $EPIC $P · Vero" "✅ ENTRADA $P | 🛑 STOP $SL | 🎯 OBJETIVO $TP (riesgo \$$RISK). Régimen: $REGIMEN. DIRECCIONAL (ER=$ER) + VOLUMEN ${VR}x, RSI $R. Confirma VWAP. Si pierde el STOP, SAL. NO promedies. ⏰ CADUCA si precio > \$$MAX_ENTRY (no perseguir)." "Hero"
+    notify_maybe "SEÑAL LONG · $EPIC $P · Vero" "✅ ENTRADA $P | 🛑 STOP $SL | 🎯 OBJETIVO $TP (riesgo \$$RISK). Régimen: $REGIMEN. DIRECCIONAL (ER=$ER) + VOLUMEN ${VR}x, RSI $R. Confirma VWAP. Si pierde el STOP, SAL. NO promedies. ⏰ CADUCA si precio > \$$MAX_ENTRY (no perseguir)." "Hero"
     # Diario de señales (para el score vs backtest): una línea JSON por señal disparada.
     # Lo evalúa scripts/senales_score.cjs (¿tocó el TP o el SL primero?) y compara el
     # win rate REAL contra el esperado del backtest. NO afecta la operación.
     printf '{"ts":%s,"fecha":"%s","symbol":"%s","epic":"%s","entry":%s,"sl":%s,"tp":%s,"atr":%s,"rsi":%s,"er":%s,"volr":%s,"regimen":"%s"}\n' \
       "$(( $(date +%s) * 1000 ))" "$(date '+%Y-%m-%d %H:%M:%S')" "$SYMBOL" "$EPIC" "$P" "$SL" "$TP" "$AT" "$R" "$ER" "$VR" "$REGIMEN" \
-      >> "$HOME/Trading/senales_aplus.jsonl"
+      >> "$SIG_FILE"
     # Armar orden (opcional, default OFF): escribe la señal para el bot de Telegram,
     # que le manda a Vero los botones ✅/❌. Se activa con ARM_ORDER=1 en el entorno.
     # NO ejecuta nada acá: el bot ejecuta solo si Vero toca ✅. Precios traducidos a
@@ -162,7 +168,7 @@ while true; do
         if (fal.length >= 1 && fal.length <= 2)
           console.log(JSON.stringify({ ts: Date.now(), fecha: '$(date '+%Y-%m-%d %H:%M')', symbol: '$SYMBOL', faltaron: fal, p: $P, rsi: $R, er: $ER, volr: $VR }));
       " 2>/dev/null)
-      [ -n "$NM" ] && echo "$NM" >> "$HOME/Trading/casi_senales.jsonl"
+      [ -n "$NM" ] && echo "$NM" >> "$CASI_FILE"
 
       # PRE-AVISO (heads-up suave, 🟡): el contexto ya pasó (liquidez/ER/tendencia/5m)
       # y el setup está estructurado (hubo pullback) — falta SOLO el gatillo: que el
@@ -186,7 +192,7 @@ while true; do
         " 2>/dev/null)
         if [ -n "$PRE" ]; then
           echo "$(date '+%H:%M:%S') ~ PRE-AVISO: $PRE"
-          ./scripts/notify.sh "🟡 Se está armando · $EPIC $P" "$PRE (ER=$ER, volr=$VR). Esto NO es entrada — es aviso de que está cerca. Espera el ✅ del bot antes de operar." "Ping"
+          notify_maybe "🟡 Se está armando · $EPIC $P" "$PRE (ER=$ER, volr=$VR). Esto NO es entrada — es aviso de que está cerca. Espera el ✅ del bot antes de operar." "Ping"
           pcd=30   # ~3 min de silencio de pre-avisos (evita spam)
         fi
       fi
