@@ -12,9 +12,17 @@ DIR="$HOME/Trading/tradingview-mcp"
 cd "$DIR" || exit 1
 
 pb=0
-cooldown=0   # lecturas restantes de silencio tras una alerta (evita spam)
-pcd=0        # cooldown propio del pre-aviso ("se está armando"), independiente del A+
+cooldown=0   # lecturas restantes de silencio tras una alerta A+ (evita spam)
 PREAVISO="${PREAVISO:-1}"  # 1 = mandar pre-aviso suave cuando falta SOLO el gatillo del rebote
+
+# --- Anti-flapping del pre-aviso ("Se está armando") ---
+# DEDUP por clave gruesa (símbolo+estado, SIN el precio) + cooldown por tiempo real.
+# Así, si solo cambia el precio del texto NO se considera un cambio de estado y no
+# se reenvía; el mismo aviso no se repite antes de COOLDOWN_MIN.
+COOLDOWN_MIN="${COOLDOWN_MIN:-25}"
+COOLDOWN_SEC=$((COOLDOWN_MIN * 60))
+last_pre_key=""   # última clave gruesa avisada (ej. "BTCUSDT:gatillo")
+last_pre_ts=0     # epoch (s) del último pre-aviso
 
 # --- Alertas de ZONAS (niveles S/R marcados en scripts/zonas.env) ---
 # Avisan al ACERCARSE o ROMPER tus niveles, INDEPENDIENTE de la señal A+.
@@ -62,7 +70,6 @@ while true; do
   REGIMEN=$([ -n "$P" ] && [ "$P" != "0" ] && "$NODE" -e "const a=($AT/$P*100);console.log(a<0.07?'calmo':(a>0.14?'volátil':'normal'))" 2>/dev/null || echo "?")
 
   [ "$cooldown" -gt 0 ] && cooldown=$((cooldown-1))
-  [ "$pcd" -gt 0 ] && pcd=$((pcd-1))
 
   if [ "$P" = "0" ] || [ -z "$P" ]; then echo "$(date '+%H:%M:%S') sin datos"; sleep 6; continue; fi
 
@@ -175,8 +182,10 @@ while true; do
       # precio vuelva sobre EMA9 con impulso, o que el RSI entre en banda. NO arma
       # orden, sonido distinto al A+ (Ping vs Hero). Excluye a propósito pullback/volr/
       # mom5 como gatillo: si falta uno de esos, NO hay setup todavía (es ruido).
-      if [ "$PREAVISO" = "1" ] && [ "$pcd" -eq 0 ]; then
-        PRE=$("$NODE" -e "
+      if [ "$PREAVISO" = "1" ]; then
+        # El node emite "CLAVE<TAB>MENSAJE": la CLAVE es el gatillo que falta
+        # (rsi-hot / rsi-low / gatillo), SIN el precio — es el "estado" del aviso.
+        PRE_RAW=$("$NODE" -e "
           const fal=[];
           if ($pb!=1) fal.push('pullback');
           if ($M2<1.0) fal.push('mom2');
@@ -186,14 +195,27 @@ while true; do
           if ($VR<$VOLR_MIN) fal.push('volr');
           const trig=['mom2','sobre-EMA9','rsi'];
           if(fal.length===1 && trig.includes(fal[0])){
-            if(fal[0]==='rsi') console.log($R>$RSI_HI?('RSI caliente '+($R).toFixed(0)+' — espera que enfríe bajo $RSI_HI, NO persigas'):('RSI bajo 50 ('+($R).toFixed(0)+') — aún sin fuerza para el rebote'));
-            else console.log('falta el gatillo: que vuelva sobre EMA9 con impulso. Todo lo demás alineado — atenta a la pantalla.');
+            let key, msg;
+            if(fal[0]==='rsi'){
+              if($R>$RSI_HI){ key='rsi-hot'; msg='RSI caliente '+($R).toFixed(0)+' — espera que enfríe bajo $RSI_HI, NO persigas'; }
+              else { key='rsi-low'; msg='RSI bajo 50 ('+($R).toFixed(0)+') — aún sin fuerza para el rebote'; }
+            } else { key='gatillo'; msg='falta el gatillo: que vuelva sobre EMA9 con impulso. Todo lo demás alineado — atenta a la pantalla.'; }
+            console.log(key + '\t' + msg);
           }
         " 2>/dev/null)
-        if [ -n "$PRE" ]; then
-          echo "$(date '+%H:%M:%S') ~ PRE-AVISO: $PRE"
-          notify_maybe "🟡 Se está armando · $EPIC $P" "$PRE (ER=$ER, volr=$VR). Esto NO es entrada — es aviso de que está cerca. Espera el ✅ del bot antes de operar." "Ping"
-          pcd=30   # ~3 min de silencio de pre-avisos (evita spam)
+        if [ -n "$PRE_RAW" ]; then
+          PRE_KEY="$SYMBOL:$(printf '%s' "$PRE_RAW" | cut -f1)"
+          PRE=$(printf '%s' "$PRE_RAW" | cut -f2-)
+          NOW=$(date +%s)
+          # DEDUP: misma clave gruesa dentro del cooldown → NO reenviar (aunque el
+          # precio del texto cambie). Una clave DISTINTA sí avisa al toque.
+          if [ "$PRE_KEY" = "$last_pre_key" ] && [ "$((NOW - last_pre_ts))" -lt "$COOLDOWN_SEC" ]; then
+            echo "$(date '+%H:%M:%S') ~ pre-aviso $PRE_KEY en cooldown ($(( (COOLDOWN_SEC - (NOW - last_pre_ts)) / 60 ))min) — no reenvío"
+          else
+            echo "$(date '+%H:%M:%S') ~ PRE-AVISO [$PRE_KEY]: $PRE"
+            notify_maybe "🟡 Se está armando · $EPIC $P" "$PRE (ER=$ER, volr=$VR). Esto NO es entrada — es aviso de que está cerca. Espera el ✅ del bot antes de operar." "Ping"
+            last_pre_key="$PRE_KEY"; last_pre_ts="$NOW"
+          fi
         fi
       fi
     fi
