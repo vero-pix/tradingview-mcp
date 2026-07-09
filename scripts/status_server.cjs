@@ -74,20 +74,30 @@ function systemStats() {
   }
 }
 
-function cpuSampleLinux() {
-  const line = fs.readFileSync("/proc/stat", "utf8").split("\n")[0].trim().split(/\s+/).slice(1).map(Number);
-  const idle = line[3] + (line[4] || 0);
-  const total = line.reduce((a, b) => a + b, 0);
-  return { idle, total };
+// CPU (Linux): sampler en segundo plano. Lee /proc/stat cada 3s y computa el %
+// desde el delta entre muestras. Sin busy-wait (antes se auto-inflaba a ~100%) y
+// sin bloquear la request: el handler solo lee el último valor calculado.
+let cpuPct = 0;
+let prevCpu = null;
+function sampleCpuLinux() {
+  try {
+    const line = fs.readFileSync("/proc/stat", "utf8").split("\n")[0].trim().split(/\s+/).slice(1).map(Number);
+    const idle = line[3] + (line[4] || 0);
+    const total = line.reduce((a, b) => a + b, 0);
+    if (prevCpu) {
+      const dTotal = total - prevCpu.total, dIdle = idle - prevCpu.idle;
+      if (dTotal > 0) cpuPct = Math.round(((dTotal - dIdle) / dTotal) * 100);
+    }
+    prevCpu = { idle, total };
+  } catch { /* /proc no disponible: deja el último valor */ }
 }
+if (IS_LINUX) {
+  sampleCpuLinux(); // muestra base
+  setInterval(sampleCpuLinux, 3000).unref();
+}
+
 function systemStatsLinux() {
-  // CPU: dos muestras de /proc/stat separadas ~120ms.
-  const a = cpuSampleLinux();
-  const until = Date.now() + 120;
-  while (Date.now() < until) { /* espera activa breve */ }
-  const b = cpuSampleLinux();
-  const dTotal = b.total - a.total, dIdle = b.idle - a.idle;
-  const cpu = dTotal > 0 ? Math.round(((dTotal - dIdle) / dTotal) * 100) : 0;
+  const cpu = cpuPct; // valor del sampler en background
 
   const mem = {};
   for (const l of fs.readFileSync("/proc/meminfo", "utf8").split("\n")) {
