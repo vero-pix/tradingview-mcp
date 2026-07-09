@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- launchd (macOS) — solo para TEST LOCAL de la status API en este Mac.
+     Cargar:  cp scripts/cl.vero.statusapi.plist ~/Library/LaunchAgents/
+              launchctl load ~/Library/LaunchAgents/cl.vero.statusapi.plist
+     Ajusta el token y (si hace falta) la ruta de node antes de cargar.
+     Bind a 127.0.0.1: NO se expone a la red, solo localhost. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>cl.vero.statusapi</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/veronicavelasquez/.local/share/fnm/aliases/default/bin/node</string>
+        <string>/Users/veronicavelasquez/Trading/tradingview-mcp/scripts/status_server.cjs</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/veronicavelasquez/Trading/tradingview-mcp</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOST</key>
+        <string>127.0.0.1</string>
+        <key>PORT</key>
+        <string>8787</string>
+        <key>STATUS_API_TOKEN</key>
+        <string>CAMBIA_ESTE_TOKEN</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/vero_statusapi.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/vero_statusapi.log</string>
+</dict>
+</plist>

@@ -1,0 +1,34 @@
+# systemd unit para el VPS (Hetzner/Linux). Instalar en /etc/systemd/system/.
+# API HTTP de SOLO LECTURA que VQL consume. No ejecuta órdenes.
+#
+#   sudo cp scripts/vero-statusapi.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now vero-statusapi
+#
+# Ajusta User, WorkingDirectory, la ruta de node y el token antes de habilitar.
+# Exponer el puerto públicamente (o vía reverse proxy con TLS) es decisión de deploy;
+# el token protege la lectura. HOST=0.0.0.0 solo si hay firewall/proxy delante.
+
+[Unit]
+Description=VQL status API (read-only) — estado del sistema de trading
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vero
+WorkingDirectory=/home/vero/Trading/tradingview-mcp
+Environment=HOST=0.0.0.0
+Environment=PORT=8787
+Environment=STATUS_API_TOKEN=CAMBIA_ESTE_TOKEN
+# Environment=TRADING_DATA_PATH=/home/vero/Trading
+ExecStart=/usr/bin/node scripts/status_server.cjs
+Restart=always
+RestartSec=3
+# Endurecimiento: la API solo lee.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/tmp
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target
