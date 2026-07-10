@@ -24,6 +24,7 @@
 const { execFileSync } = require("child_process");
 const fs   = require("fs");
 const path = require("path");
+const bn   = require("./binance_client.cjs");
 
 const HOME    = process.env.HOME;
 const DIR     = path.join(HOME, "Trading", "tradingview-mcp");
@@ -38,6 +39,9 @@ const WINDOW_MS  = (process.env.WINDOW_MIN ? Number(process.env.WINDOW_MIN) : 5)
 const SYMBOL     = process.env.SYMBOL || "ETHUSDT";
 const EPIC_MATCH = process.env.EPIC_MATCH || "ETHUSD";
 const INTERVAL   = (process.env.INTERVAL ? Number(process.env.INTERVAL) : 5) * 1000;
+// Red de seguridad Earn→Spot: colchón sobre el nocional (slippage) y extra a redimir.
+const SLIPPAGE   = 1.005;  // +0.5% sobre el nocional para cubrir slippage del market buy
+const REDEEM_BUFFER = process.env.REDEEM_BUFFER != null ? Number(process.env.REDEEM_BUFFER) : 0.5; // USDT extra a redimir
 
 function ts() { return new Date().toISOString().slice(11, 19); }
 function notify(t, m, s) { try { execFileSync("bash", [path.join(DIR, "scripts", "notify.sh"), t, m, s], { stdio: "ignore" }); } catch (e) {} }
@@ -60,6 +64,74 @@ function ultimaSenal() {
         console.log(`${ts()} baseline: última señal vista = ${s && s.ts ? s.ts : "(ninguna)"}`);
     }
 })();
+
+// Red de seguridad contra el auto-subscribe de Earn: ANTES de comprar, revisa que
+// el USDT LIBRE en Spot cubra el nocional de la orden. Si no, y hay USDT en Flexible
+// Earn (LDUSDT), redime a Spot lo que falta y espera la acreditación (flexible es
+// instantáneo). En dry-run NO redime: solo loguea lo que haría. Devuelve
+// { ok, msg }: si ok=false, NO se debe comprar (se muestra el motivo, sin fallar mudo).
+async function ensureSpotUsdt() {
+    let price, balances;
+    try {
+        [price, balances] = await Promise.all([bn.getPrice(SYMBOL), bn.getBalances()]);
+    } catch (e) {
+        return { ok: false, msg: `red de seguridad: no pude leer precio/balance (${e.message})` };
+    }
+    const needed = AUTO_SIZE * price * SLIPPAGE;
+    const freeUsdt = Number((balances.find(b => b.asset === "USDT") || {}).free || 0);
+    if (freeUsdt >= needed) {
+        return { ok: true, msg: `USDT libre ${freeUsdt.toFixed(2)} ≥ nocional ${needed.toFixed(2)} — sin redención` };
+    }
+    const shortfall = needed - freeUsdt;
+
+    // ¿Hay USDT en Flexible Earn? (requiere permiso Simple Earn en la key)
+    let pos;
+    try {
+        pos = await bn.getFlexibleEarnPosition("USDT");
+    } catch (e) {
+        // p.ej. -2015 = la key no tiene permiso Simple Earn → mostrar, no fallar mudo
+        return { ok: false, msg: `red de seguridad: no pude leer Flexible Earn — ¿la key de ejecución tiene permiso "Simple Earn"? (${e.message})` };
+    }
+    const earnTotal = pos.reduce((s, r) => s + Number(r.totalAmount || 0), 0);
+    const product = pos.find(r => Number(r.totalAmount) > 0);
+    if (!earnTotal || !product) {
+        return { ok: false, msg: `USDT libre ${freeUsdt.toFixed(2)} < nocional ${needed.toFixed(2)} y no hay USDT en Flexible Earn para redimir` };
+    }
+    if (freeUsdt + earnTotal < needed) {
+        return { ok: false, msg: `fondos insuficientes: libre ${freeUsdt.toFixed(2)} + Earn ${earnTotal.toFixed(2)} < nocional ${needed.toFixed(2)}` };
+    }
+
+    const redeemAmt = Math.min(earnTotal, shortfall + REDEEM_BUFFER);
+    const amountStr = redeemAmt.toFixed(8);
+
+    if (!live) {
+        console.log(`${ts()} 🛟 [dry-run] redimiría ${redeemAmt.toFixed(2)} USDT de Flexible Earn (${product.productId}) → Spot | libre ${freeUsdt.toFixed(2)}, falta ${shortfall.toFixed(2)}, en Earn ${earnTotal.toFixed(2)}`);
+        return { ok: true, msg: `dry-run: sin redención real` };
+    }
+
+    console.log(`${ts()} 🛟 redimiendo ${redeemAmt.toFixed(2)} USDT de Flexible Earn (${product.productId}) → Spot | libre ${freeUsdt.toFixed(2)} < nocional ${needed.toFixed(2)}`);
+    try {
+        const res = await bn.redeemFlexibleEarn(product.productId, amountStr);
+        console.log(`${ts()} 🛟 redención enviada: ${JSON.stringify(res)}`);
+        notify("🛟 Redención Earn→Spot", `${redeemAmt.toFixed(2)} USDT redimidos para cubrir la compra ${SYMBOL}.`, "Glass");
+    } catch (e) {
+        return { ok: false, msg: `red de seguridad: la redención de Earn falló — ¿permiso "Simple Earn" en la key? (${e.message})` };
+    }
+
+    // Flexible acredita al instante, pero confirmamos antes de comprar (poll ≤ 10s).
+    const t0 = Date.now();
+    while (Date.now() - t0 < 10000) {
+        await new Promise(r => setTimeout(r, 1000));
+        let bal2;
+        try { bal2 = await bn.getBalances(); } catch (e) { continue; }
+        const f2 = Number((bal2.find(b => b.asset === "USDT") || {}).free || 0);
+        if (f2 >= needed) {
+            console.log(`${ts()} 🛟 acreditado: USDT libre ahora ${f2.toFixed(2)} ≥ nocional ${needed.toFixed(2)}`);
+            return { ok: true, msg: `redimidos ${redeemAmt.toFixed(2)} USDT de Earn` };
+        }
+    }
+    return { ok: false, msg: `red de seguridad: redención enviada pero el USDT no se acreditó en Spot a tiempo (>10s)` };
+}
 
 function ejecutar(sig) {
     const args = ["scripts/binance_order.cjs", "buy", "--size", String(AUTO_SIZE), "--symbol", SYMBOL];
@@ -95,6 +167,16 @@ async function tick() {
     }
 
     console.log(`${ts()} 🎯 A+ NUEVA ${SYMBOL} entry~${sig.entry} sl ${sig.sl} tp ${sig.tp} → ejecutando (${live ? "LIVE" : "dry-run"})`);
+
+    // Red de seguridad: asegura USDT libre en Spot (redime de Earn si hace falta)
+    // ANTES de comprar. Si no se puede cubrir, no compra y muestra el motivo.
+    const guard = await ensureSpotUsdt();
+    console.log(`${ts()} 🛟 ${guard.msg}`);
+    if (!guard.ok) {
+        notify("⚠️ Auto-ejecución NO entró", `${SYMBOL}: ${guard.msg}`, "Basso");
+        return;
+    }
+
     const r = ejecutar(sig);
     const linea = resumen(r.out) || (r.ok ? "ejecutado" : "sin salida");
     if (r.ok) {

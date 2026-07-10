@@ -212,9 +212,34 @@ async function testAuth() {
     return { ok: true, canTrade: acc.canTrade, tipo: acc.accountType };
 }
 
+// -----------------------------------------------------------------------------
+// SIMPLE EARN (Flexible) — para la red de seguridad de auto-redención.
+// El USDT parqueado en Flexible Earn (aparece como LDUSDT en el balance Spot) NO
+// se puede gastar en una orden hasta redimirlo a Spot. Estas dos funciones lo
+// consultan y lo redimen. ⚠️ Requieren que la API key tenga el permiso "Simple
+// Earn" habilitado; si no, la llamada firmada rebota con -2015 (permiso) y el
+// llamador debe MOSTRAR el error, no fallar mudo. Solo existen en real (api.binance.com),
+// no en testnet.
+// -----------------------------------------------------------------------------
+async function getFlexibleEarnPosition(asset = "USDT") {
+    // GET /sapi/v1/simple-earn/flexible/position — posición flexible por activo.
+    // Devuelve filas con { asset, productId, totalAmount (redimible), ... }.
+    const r = await signedCall("GET", "/sapi/v1/simple-earn/flexible/position", { asset, size: 100 });
+    return (r && r.rows) || [];
+}
+
+async function redeemFlexibleEarn(productId, amount) {
+    // POST /sapi/v1/simple-earn/flexible/redeem — redime a Spot (destAccount SPOT).
+    // Flexible acredita al instante. Devuelve { redeemId, success }.
+    return signedCall("POST", "/sapi/v1/simple-earn/flexible/redeem", {
+        productId, amount, destAccount: "SPOT",
+    });
+}
+
 module.exports = {
     getConfig, sign, toQuery, roundStep, roundTick,
     getPrice, getSymbolRules, getBalances, getOpenOrders, getMyTrades,
     placeMarketBuy, placeOcoSell, cancelOrder, testAuth,
+    getFlexibleEarnPosition, redeemFlexibleEarn,
     publicCall, signedCall,
 };
