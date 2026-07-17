@@ -12,6 +12,12 @@
 //   - ER 1m ≥ 0,30 (piso duro) · ER 5m ≥ 0,25 · período ER 14
 //   - RSI máximo 70 (antes 62) · Mom5 mínimo 0,6×ATR (antes % del precio)
 //   - VolR ≥ 1,0 (antes 1,20) · No entrar a < $3 de una resistencia
+//
+// PARIDAD con el detector (2026-07-17): alineadas 4 divergencias Pine↔detector:
+//   1. Pullback: regla estructural (low[2..4]≤e9) → DISTANCIA con latch ((P−EMA9)≤0,5×ATR)
+//   2. VolR: denominador SMA 50 → ventana cerrada real (99 = 100 Binance − 1 en formación)
+//   3. VolAbs "mercado vivo": default 10 → 50 (LIQ_MIN del detector para ETH)
+//   4. Resistencias: defaults sincronizados a mano con scripts/zonas.env (1946,5)
 // =============================================================================
 
 indicator("Señal A+ Completa", shorttitle="A+", overlay=false)
@@ -36,18 +42,25 @@ rsi_max    = input.float(70.0, "RSI máximo (spread adj)", step=1.0,  group="Fil
 mom5_atr   = input.float(0.6,  "Mom5 mínimo (×ATR)",      step=0.1,  group="Filtros A+")
 mom2_min   = input.float(1.0,  "Mom2 mínimo ($, rebote 2 velas)", step=0.5, group="Filtros A+")
 volr_min   = input.float(1.0,  "VolR mínimo",             step=0.05, group="Filtros A+")
-volabs_min = input.float(10.0, "VolAbs mínimo (mercado vivo)", step=1.0, group="Filtros A+")
+// DIVERGENCIA CORREGIDA (paridad 2026-07-17): default era 10; el detector en runtime
+// usa LIQ_MIN=50 para ETH (detector_servicio.sh L39; el plist NO lo sobreescribe).
+volabs_min = input.float(50.0, "VolAbs mínimo (mercado vivo)", step=1.0, group="Filtros A+")
 vwap_bloquea = input.bool(true, "VWAP bloquea la señal (precio debe estar sobre VWAP)", group="Filtros A+")
 
 // --- Resistencias (las pones tú, leídas de TU chart de Capital.com) ---
 // Deja en 0 las que no uses. El precio debe estar al menos 'dist_min' por debajo
 // de la resistencia más cercana ARRIBA, o el spread se come la ganancia.
-// Defaults = zonas autodetectadas 2026-07-01 en precio Capital.com (Binance −~3):
-// 2026-07-06: ETH en máximos ~$1.790 (rompiendo al alza, sin R histórica encima).
-// Resistencias = redondos psicológicos por arriba. Actualízalas cuando cambie el rango.
-res1     = input.float(1800.0, "Resistencia 1 ETH ($)", group="Resistencias ETH")
-res2     = input.float(1810.0, "Resistencia 2 ETH ($)", group="Resistencias ETH")
-res3     = input.float(1825.0, "Resistencia 3 ETH ($)", group="Resistencias ETH")
+// ⚠️ SYNC MANUAL con scripts/zonas.env (el Pine no puede leer archivos). Cuando
+// refresques zonas.env, actualiza estos defaults a mano. Valores actuales tomados de
+// zonas.env (refrescado 2026-07-15, símbolo ETHUSDT/Binance): la ÚNICA resistencia
+// sobre el precio (~1931) es 1946.5 — la que mide la condición 9 del A+. El resto de
+// zonas.env (1900 / 1864.5 / 1797.1) son SOPORTES (van abajo), así que res2/res3
+// quedan en 0 (0 = ignorada; no hay más R encima).
+// OJO OFFSET: zonas.env está en precio Binance (ETHUSDT). Si el chart es
+// CAPITALCOM:ETHUSD (≈Binance −$3), la resistencia equivalente sería ~1943,5.
+res1     = input.float(1946.5, "Resistencia 1 ETH ($)", group="Resistencias ETH")
+res2     = input.float(0.0,    "Resistencia 2 ETH ($)", group="Resistencias ETH")
+res3     = input.float(0.0,    "Resistencia 3 ETH ($)", group="Resistencias ETH")
 dist_min = input.float(3.0, "Distancia mínima a resistencia ($)", step=0.5, group="Resistencias ETH")
 // Resistencias de BTC (se usan solas cuando el chart es un símbolo con "BTC")
 res1_btc = input.float(60285.0, "Resistencia 1 BTC ($)", group="Resistencias BTC")
@@ -111,9 +124,15 @@ mom5 = close[1] - close[6]
 // (calc_indicators mom2) — es el filtro que faltaba en el chart y causaba A+ sin gong.
 mom2 = close[1] - close[3]
 
-// Volumen: promedio de las 3 últimas velas cerradas vs promedio de 50
+// Volumen: promedio de las 3 últimas velas cerradas / promedio de la VENTANA cerrada.
+// DIVERGENCIA CORREGIDA (paridad 2026-07-17): el detector NO usa 50 velas — usa el
+// promedio de TODA la ventana cerrada (calc_indicators.js L60 `promTodos`). Esa
+// ventana la fija ohlcv_binance.js con BINANCE_LIMIT=100 velas y calc_indicators
+// descarta la vela en formación → 99 velas CERRADAS. Denominador correcto = SMA 99.
+// (El backtest_aplus.cjs usa 100 por un off-by-one propio; en runtime son 99 → 99.)
+vol_win = input.int(99, "VolR: ventana promedio (100 Binance − 1 en formación)", minval=2, group="Filtros A+")
 vol3    = math.avg(volume[1], volume[2], volume[3])
-vol_avg = ta.sma(volume[1], 50)
+vol_avg = ta.sma(volume[1], vol_win)
 volr    = vol_avg > 0 ? vol3 / vol_avg : 0.0
 volabs  = vol3
 
@@ -152,8 +171,28 @@ f3_er5m = er_5m >= umbral_er_5m
 // Filtro 4: EMA9 sobre EMA21 (estructura alcista)
 f4_alcista = e9 > e21
 
-// Filtro 5: pullback a EMA9 en las 3 velas previas + rebote (cierre sobre EMA9)
-f5_pullback = (low[2] <= e9[2] or low[3] <= e9[3] or low[4] <= e9[4]) and precio > e9
+// Filtro 5: pullback a EMA9 por DISTANCIA (= detector), con LATCH sticky + rebote.
+// DIVERGENCIA CORREGIDA (paridad 2026-07-17): antes el Pine usaba una regla
+// ESTRUCTURAL (low[2..4]<=e9), que aproximaba el pullback mirando 3 velas fijas. El
+// detector usa DISTANCIA y ESTADO (backtest_aplus.cjs L81:
+// `if ((P - E9) <= PULLBACK_ATR*AT) pb = 1`, PULLBACK_ATR=0.5): marca "hubo pullback"
+// cuando el precio se acerca a ≤0,5×ATR del EMA9 y MANTIENE ese estado mientras el
+// contexto siga alcista, hasta que dispara el rebote. Replicamos ese latch:
+//   - se PRENDE cuando (precio − EMA9) ≤ 0,5×ATR
+//   - se APAGA si se rompe el contexto (liquidez / ER 1m / ER 5m / EMA9>EMA21), igual
+//     que el detector resetea pb=0 en esos casos.
+// El detector además resetea pb tras disparar (cooldown 5min); el Pine no tiene
+// cooldown, pero `nueva_senal` (señal y no señal[1]) evita repetir el triángulo, así
+// que el efecto visible es el mismo. El "cierre sobre EMA9" (precio ≥ e9) es la parte
+// de rebote de la señal, igual que el detector exige P>=E9.
+pullback_atr = input.float(0.5, "Pullback (×ATR, = detector)", step=0.1, group="Filtros A+")
+ctx_pb_ok = f1_vivo and f2_er1m and f3_er5m and f4_alcista
+var bool pb_latch = false
+if not ctx_pb_ok
+    pb_latch := false
+else if (precio - e9) <= pullback_atr * atr14
+    pb_latch := true
+f5_pullback = pb_latch and precio >= e9
 
 // Filtro 5b: momentum del rebote medido en ×ATR (igual que el detector, calibrado 2026-07-02).
 // Ojo: pedir MÁS momentum EMPEORA (es perseguir el envión) → el óptimo es 0.6×ATR, no más.
