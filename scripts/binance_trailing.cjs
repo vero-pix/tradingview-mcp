@@ -2,7 +2,7 @@
 // =============================================================================
 // binance_trailing.cjs — Stop dinámico (trailing) para posiciones Binance SPOT.
 //
-// Gemelo de capital_breakeven.cjs, adaptado a Binance. Vigila la posición LONG con
+// Vigila la posición LONG con
 // bracket OCO y va SUBIENDO el stop a medida que el trade gana, por escalones de R
 // (R = riesgo inicial = entrada − stop inicial):
 //
@@ -25,6 +25,7 @@ const fs   = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
 const bn   = require("./binance_client.cjs");
+const earn = require("./lib/earn_net.cjs");   // red Earn→Spot compartida (lado venta)
 
 const HOME  = process.env.HOME;
 const DIR   = path.join(HOME, "Trading", "tradingview-mcp");
@@ -34,6 +35,7 @@ const argv = process.argv.slice(2);
 const live = argv.includes("--live");
 function flag(n, d) { const i = argv.indexOf(n); return i !== -1 ? argv[i + 1] : d; }
 const SYMBOL   = flag("--symbol", process.env.SYMBOL || "ETHUSDT");
+const BASE     = SYMBOL.replace(/USDT$/, "");   // ETHUSDT → ETH
 const INTERVAL = (process.env.INTERVAL ? Number(process.env.INTERVAL) : 20) * 1000;
 const AT_R     = process.env.BREAKEVEN_AT_R != null ? Number(process.env.BREAKEVEN_AT_R) : 1.0;
 const LOCK_USD = process.env.LOCK_USD != null ? Number(process.env.LOCK_USD) : 0;
@@ -96,9 +98,23 @@ async function tick() {
     try {
         // 1) cancela el OCO viejo (cancelar una pata cancela la lista completa)
         await bn.cancelOrder(SYMBOL, stopO.orderId);
-        // 2) re-lee el ETH libre y re-pone el OCO con el stop más alto (mismo TP)
-        const bal = (await bn.getBalances()).find(b => b.asset === SYMBOL.replace(/USDT$/, ""));
-        const q = bn.roundStep(bal ? Number(bal.free) : qty, rules.stepSize);
+        // 1.5) Red Earn→Spot en el HUECO peligroso. Entre el cancel y el nuevo OCO la
+        //      posición está desnuda, y el ETH recién liberado es justo lo que Binance
+        //      puede auto-suscribir a Simple Earn. Si pasa, el placeOcoSell de abajo
+        //      rebota (-2010) y la posición se queda SIN STOP. Por eso: si tras cancelar
+        //      falta ETH libre, redimirlo de Earn ANTES de armar el bracket nuevo.
+        //      (El chequeo va DESPUÉS del cancel a propósito: antes, el ETH está
+        //       reservado por el OCO vigente y "libre" da ~0 sin que falte nada.)
+        let bal  = (await bn.getBalances()).find(b => b.asset === BASE);
+        let free = bal ? Number(bal.free) : 0;
+        if (free < qty - 1e-8) {
+            const red = await earn.ensureSpotAsset(BASE, qty);
+            if (!red.ok) console.log(`${ts()}   ⚠ ${red.msg}`);
+            bal  = (await bn.getBalances()).find(b => b.asset === BASE);
+            free = bal ? Number(bal.free) : 0;
+        }
+        // 2) re-pone el OCO con el stop más alto (mismo TP)
+        const q = bn.roundStep(free || qty, rules.stepSize);
         const oco = await bn.placeOcoSell(SYMBOL, q, { tp, stop: nuevoStop });
         console.log(`${ts()}   ✅ stop subido a ${nuevoStop} (nuevo listId ${oco.orderListId})`);
         notify(aseguradoR > 0 ? "📈 Ganancia asegurada (Binance)" : "🛡️ Stop a breakeven (Binance)",

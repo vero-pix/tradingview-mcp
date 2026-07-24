@@ -4,7 +4,7 @@
 //
 // Replica la lógica del detector (los MISMOS filtros, con umbrales adaptativos en
 // múltiplos de ATR) sobre datos históricos de Binance, simula cada trade (entra en
-// A+, sale en stop 2×ATR o target 2×ATR), DESCUENTA EL SPREAD real de Capital, y
+// A+, sale en stop 2×ATR o target 2×ATR), DESCUENTA EL COSTO de operar, y
 // reporta: nº de trades, win rate, neto, profit factor, drawdown.
 //
 // Uso:

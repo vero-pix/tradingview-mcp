@@ -1,6 +1,6 @@
 //@version=5
 // =============================================================================
-// Señal A+ Completa — ETH Scalping 1m (Vero, Capital.com)
+// Señal A+ Completa — ETH Scalping 1m (Vero, Binance)
 // Autor: Vero + Claude, 2026-06-30 (rev. 2: sin repintado + VWAP auto + resistencias)
 //
 // Valida los filtros de la señal A+ usando SIEMPRE la última vela CERRADA
@@ -47,7 +47,7 @@ volr_min   = input.float(1.0,  "VolR mínimo",             step=0.05, group="Fil
 volabs_min = input.float(50.0, "VolAbs mínimo (mercado vivo)", step=1.0, group="Filtros A+")
 vwap_bloquea = input.bool(true, "VWAP bloquea la señal (precio debe estar sobre VWAP)", group="Filtros A+")
 
-// --- Resistencias (las pones tú, leídas de TU chart de Capital.com) ---
+// --- Resistencias (las pones tú, leídas de TU chart) ---
 // Deja en 0 las que no uses. El precio debe estar al menos 'dist_min' por debajo
 // de la resistencia más cercana ARRIBA, o el spread se come la ganancia.
 // ⚠️ SYNC MANUAL con scripts/zonas.env (el Pine no puede leer archivos). Cuando
@@ -56,8 +56,7 @@ vwap_bloquea = input.bool(true, "VWAP bloquea la señal (precio debe estar sobre
 // sobre el precio (~1931) es 1946.5 — la que mide la condición 9 del A+. El resto de
 // zonas.env (1900 / 1864.5 / 1797.1) son SOPORTES (van abajo), así que res2/res3
 // quedan en 0 (0 = ignorada; no hay más R encima).
-// OJO OFFSET: zonas.env está en precio Binance (ETHUSDT). Si el chart es
-// CAPITALCOM:ETHUSD (≈Binance −$3), la resistencia equivalente sería ~1943,5.
+// zonas.env y el chart van en precio Binance (ETHUSDT): mismo precio, sin offset.
 res1     = input.float(1946.5, "Resistencia 1 ETH ($)", group="Resistencias ETH")
 res2     = input.float(0.0,    "Resistencia 2 ETH ($)", group="Resistencias ETH")
 res3     = input.float(0.0,    "Resistencia 3 ETH ($)", group="Resistencias ETH")
@@ -266,7 +265,7 @@ bgcolor(nueva_senal ? color.new(#00FF88, 35) : na, title="Vela señal A+")
 
 // Alerta: solo en vela confirmada, para que no suene en falso intrabar
 alertcondition(nueva_senal, title="🔔 Señal A+ ETH",
-     message="⚡ ETH SEÑAL A+ — Revisa VWAP y ejecuta en Capital.com")
+     message="⚡ ETH SEÑAL A+ — Revisa VWAP; la autocompra de Binance la toma")
 
 // -----------------------------------------------------------------------------
 // Tabla de estado de filtros (esquina superior derecha)

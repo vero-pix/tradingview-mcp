@@ -13,9 +13,11 @@ cd "$DIR" || exit 1
 HOUR=$(date +%H)
 if [ "$HOUR" -lt 12 ]; then PREFIJO="☀️ Buenos días Vero — repaso de ayer:"; else PREFIJO="🌙 Cierre del día, Vero:"; fi
 
-# Reporte LEÍDO DIRECTO de Capital.com (API) — ya no depende de bajar CSVs a mano
-REPORTE=$("$NODE" scripts/capital_reporte.cjs 2>/dev/null)
-[ -z "$REPORTE" ] && REPORTE="(No pude leer el historial de Capital ahora.)"
+# Reporte LEÍDO DIRECTO de BINANCE (myTrades, ETH-only, casado FIFO) — MISMA fuente
+# que la alerta de score y que VQL (scripts/lib/realized-pnl.cjs): misma ventana y
+# mismo cálculo, así los tres muestran EXACTAMENTE el mismo neto.
+REPORTE=$("$NODE" scripts/reporte_binance.cjs 2>/dev/null)
+[ -z "$REPORTE" ] && REPORTE="(No pude leer el historial de Binance ahora.)"
 TEXTO="${PREFIJO}
 ${REPORTE}"
 

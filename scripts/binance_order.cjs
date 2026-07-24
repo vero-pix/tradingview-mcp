@@ -1,7 +1,7 @@
 // =============================================================================
 // binance_order.cjs — Enviar / cerrar órdenes en Binance Spot (CON GUARDRAILS)
 //
-// Gemelo de capital_order.cjs, adaptado a Binance Spot. Diferencia clave: el
+// Órdenes en Binance Spot. Diferencia clave con un CFD: el
 // bracket (stop + take-profit) se pone con UNA orden OCO nativa apenas se compra,
 // así el bróker sostiene ambos desde el segundo 1 (no hace falta stopguard/tpguard
 // vigilando). Solo LONG (compra ETH, vende con OCO).
@@ -76,6 +76,70 @@ function askConfirm(promptTxt) {
     });
 }
 function appendTrade(obj) { fs.appendFileSync(DIARIO, JSON.stringify(obj) + "\n"); }
+
+const REDEEM_BUFFER_ETH = process.env.REDEEM_BUFFER_ETH != null ? Number(process.env.REDEEM_BUFFER_ETH) : 0;
+const REDENCIONES_LOG   = path.join(HOME, "Trading", "earn_redenciones.jsonl");
+const ts    = () => new Date().toISOString();
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+function logRedencion(obj) {
+    try { fs.appendFileSync(REDENCIONES_LOG, JSON.stringify({ t: ts(), ...obj }) + "\n"); } catch (e) {}
+}
+
+// Red de seguridad Earn→Spot para la VENTA (gemela de ensureSpotUsdt del lado compra).
+// Binance puede auto-suscribir el ETH a Simple Earn / "Staking Pasivo". Antes de que
+// el OCO o un close necesiten vender, esto garantiza ETH LIBRE en Spot: si falta y hay
+// ETH en FLEXIBLE Earn lo redime (acredita al instante). Si el ETH está en LOCKED (no
+// redimible), avisa por Telegram — ese sí es un bloqueo real que Vero resuelve a mano.
+// Devuelve { ok, msg } y NO tira: el llamador decide. Loguea cada redención.
+async function ensureSpotEth(needed) {
+    let free;
+    try { free = Number(((await bn.getBalances()).find(b => b.asset === BASE) || {}).free || 0); }
+    catch (e) { return { ok: false, msg: `no pude leer balance Spot ${BASE} (${e.message})` }; }
+    if (free >= needed - 1e-8) return { ok: true, msg: `${BASE} libre ${free} ≥ ${needed.toFixed(6)} — sin redención` };
+
+    let flex;
+    try { flex = await bn.getFlexibleEarnPosition(BASE); }
+    catch (e) { return { ok: false, msg: `red venta: no pude leer Flexible Earn ${BASE} — ¿permiso "Simple Earn" en la key? (${e.message})` }; }
+    const productos = flex.filter(r => Number(r.totalAmount || 0) > 0)
+                          .sort((a, b) => Number(b.totalAmount) - Number(a.totalAmount));
+    const flexTotal = productos.reduce((s, r) => s + Number(r.totalAmount || 0), 0);
+
+    if (free + flexTotal < needed - 1e-8) {
+        // el flexible no alcanza → ¿hay ETH atrapado en LOCKED? eso es el bloqueo real
+        let lockedTotal = 0;
+        try { lockedTotal = (await bn.getLockedEarnPosition(BASE)).reduce((s, r) => s + Number(r.amount || r.totalAmount || 0), 0); }
+        catch (e) { /* sin permiso/endpoint: seguimos, lo común es flexible */ }
+        if (lockedTotal > 0) {
+            const m = `🔒 ETH en Staking LOCKED (no redimible al instante): ${lockedTotal.toFixed(6)} ${BASE}. Para vender falta ${(needed - free).toFixed(6)} y el flexible solo cubre ${flexTotal.toFixed(6)}. Entra a Binance → Earn a redimir/esperar el desbloqueo — no lo puedo resolver solo.`;
+            notify("🔒 ETH atrapado en Staking — venta bloqueada", m, "Basso");
+            logRedencion({ tipo: "LOCKED_BLOQUEO", asset: BASE, needed, free, flexTotal, lockedTotal });
+            return { ok: false, msg: m };
+        }
+        return { ok: false, msg: `${BASE} libre ${free} + Flexible ${flexTotal.toFixed(6)} < ${needed.toFixed(6)}; no hay más para redimir` };
+    }
+
+    // redimir de los productos flexibles hasta cubrir el faltante (+ buffer)
+    let porRedimir = Math.min(flexTotal, (needed - free) + REDEEM_BUFFER_ETH);
+    for (const p of productos) {
+        if (porRedimir <= 1e-8) break;
+        const amt = Math.min(Number(p.totalAmount), porRedimir);
+        console.log(`${ts()} 🛟 redimiendo ${amt.toFixed(6)} ${BASE} de Flexible Earn (${p.productId}) → Spot | libre ${free}, falta ${(needed - free).toFixed(6)}`);
+        try {
+            const res = await bn.redeemFlexibleEarn(p.productId, amt.toFixed(8));
+            logRedencion({ tipo: "REDENCION", asset: BASE, monto: amt, productId: p.productId, needed, redeemId: res && res.redeemId });
+            porRedimir -= amt;
+        } catch (e) {
+            return { ok: false, msg: `red venta: la redención de ${BASE} falló — ¿permiso "Simple Earn"? (${e.message})` };
+        }
+    }
+    // confirmar acreditación (flexible es instantáneo; poll ≤ 10s por si acaso)
+    for (let i = 0; i < 10; i++) {
+        await sleep(1000);
+        const b2 = Number(((await bn.getBalances()).find(b => b.asset === BASE) || {}).free || 0);
+        if (b2 >= needed - 1e-8) { console.log(`${ts()} 🛟 acreditado: ${BASE} libre ahora ${b2}`); return { ok: true, msg: `redimidos ${BASE} de Earn` }; }
+    }
+    return { ok: false, msg: `red venta: redención enviada pero el ${BASE} no se acreditó en Spot a tiempo (>10s)` };
+}
 
 // ¿Cuántos brackets (posiciones) hay abiertos? = nº de listas OCO distintas abiertas.
 async function contarPosiciones() {
@@ -203,6 +267,10 @@ async function cmdBuy() {
         if (f.commissionAsset === BASE) comBase += Number(f.commission || 0);
     }
     const sellQty = bn.roundStep(fillQty - comBase, rules.stepSize);
+    // red de seguridad venta: si el auto-subscribe se llevó el ETH recién comprado,
+    // redímelo antes de armar el OCO (si no, el OCO rebota con -2010)
+    const guardVenta = await ensureSpotEth(sellQty);
+    if (!guardVenta.ok) console.log(ylw("  ⚠ " + guardVenta.msg));
     let oco;
     try { oco = await bn.placeOcoSell(SYMBOL, sellQty, { tp: target, stop }); }
     catch (e) {
@@ -246,6 +314,15 @@ async function cmdClose() {
     for (const o of (open || [])) {
         try { await bn.cancelOrder(SYMBOL, o.orderId); } catch (e) { /* puede que ya se haya cancelado en cascada */ }
     }
+    // 1.5) traer el ETH de Earn a Spot si el auto-subscribe lo movió (flexible = instantáneo)
+    try {
+        const flexTotal = (await bn.getFlexibleEarnPosition(BASE)).reduce((s, r) => s + Number(r.totalAmount || 0), 0);
+        if (flexTotal > 0) {
+            const freeNow = Number(((await bn.getBalances()).find(b => b.asset === BASE) || {}).free || 0);
+            const g = await ensureSpotEth(freeNow + flexTotal);   // redime TODO lo que esté en Earn
+            if (!g.ok) console.log(ylw("  ⚠ red venta: " + g.msg));
+        }
+    } catch (e) { console.log(ylw("  ⚠ no pude revisar Earn ETH antes de cerrar: " + e.message)); }
     // 2) vender a mercado el ETH libre (re-lee balance por si el cancel liberó locked)
     const bal2 = (await bn.getBalances()).find(b => b.asset === BASE);
     const q2 = bn.roundStep(bal2 ? Number(bal2.free) : 0, rules.stepSize);

@@ -7,8 +7,8 @@
 // Por defecto SOLO propone (no escribe); con --write actualiza zonas.env dejando
 // un backup. Tú revisas y ajustas antes de confiar en ellas.
 //
-// Nota: los niveles salen en precio BINANCE (igual que zonas.env). El offset a
-// Capital (~$3) ya lo absorben los watchers/órdenes.
+// Nota: los niveles salen en precio BINANCE (igual que zonas.env), que es el
+// mismo precio en que se opera.
 //
 // Uso:
 //   node scripts/detectar_zonas.cjs                 # propone (no escribe)

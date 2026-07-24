@@ -1,98 +1,41 @@
 #!/usr/bin/env node
 // =============================================================================
-// telegram_confirm_bot.cjs — Bot de Telegram con botones ✅ Comprar / ❌ Paso
+// telegram_confirm_bot.cjs — Bot de Telegram: avisos + comandos + mantenedor
 //
-// Cuando el detector arma una señal A+ (escribe /tmp/vero_pending_order.json),
-// el bot manda a Telegram un mensaje con dos botones. Vero toca ✅ desde el
-// celular (dentro de la ventana de validez) y el bot ABRE la operación
-// bracketeada reusando `capital_order.cjs buy` (stop + take-profit + guardrails).
+// NOTIFICADOR PURO (sistema Binance-only): el bot avisa por Telegram y responde
+// comandos de info (estado, btc, binance, zonas, casi, score…) y controla la
+// AUTOCOMPRA automática de Binance vía el mantenedor
+// (/auto · /pausar · /reanudar · /size → control/autoexec_control.json).
 //
-// ⚠️ Seguridad: solo el chat de Vero puede confirmar.
-//    Modos: sin flags = DRY-RUN (no opera). --demo = cuenta demo. --live = real.
-//    Antes de ejecutar valida: ventana de tiempo + que el precio no se disparó.
+// La compra real la ejecuta `binance_autoexec.cjs` (automática). Este bot NO abre
+// órdenes ni pide confirmación de compra.
+//
+// ⚠️ Seguridad: solo el chat de Vero puede mandar comandos.
+//    Modos: --live = producción.
 //
 // Uso:
-//   node scripts/telegram_confirm_bot.cjs --test          # botones de prueba
-//   node scripts/telegram_confirm_bot.cjs --demo &        # escucha, opera en demo
-//   node scripts/telegram_confirm_bot.cjs --live &        # (real, con topes)
+//   node scripts/telegram_confirm_bot.cjs --live &        # escucha y avisa
 //
-// Env: BOT_SIZE (default 0.3), BOT_WINDOW_MIN (default 5), MAX_CHASE_USD (default 2).
 // =============================================================================
 
 const fs   = require("fs");
 const path = require("path");
 const os   = require("os");
-const { execFileSync, execSync, execFile } = require("child_process");
-const capital = require("./capital_client.cjs");
+const { execSync, execFile } = require("child_process");
 const binance = require("./binance_client.cjs");
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 const HOME = process.env.HOME;
 const DIR  = path.join(HOME, "Trading", "tradingview-mcp");
-// El detector escribe los pendings en /tmp (literal) — el bot los busca ahí mismo.
-// Un archivo por instrumento: /tmp/vero_pending_<EPIC>.json (más el legacy _order).
-const PENDING_DIR = "/tmp";
-function pendingFiles() {
-    try { return fs.readdirSync(PENDING_DIR)
-        .filter(f => /^vero_pending_.+\.json$/.test(f))
-        .map(f => path.join(PENDING_DIR, f)); } catch (e) { return []; }
-}
 const NODE = (() => {
     const p = path.join(HOME, ".local/share/fnm/aliases/default/bin/node");
     try { fs.accessSync(p, fs.constants.X_OK); return p; } catch (e) { return process.execPath; }
 })();
 
 const argv = process.argv.slice(2);
-const test = argv.includes("--test");
 const live = argv.includes("--live");
 const demo = argv.includes("--demo");
 const MODE = live ? "LIVE" : (demo ? "DEMO" : "DRY-RUN");
-
-const SIZE       = process.env.BOT_SIZE       != null ? Number(process.env.BOT_SIZE)       : 0.3;
-const WINDOW_MS  = (process.env.BOT_WINDOW_MIN != null ? Number(process.env.BOT_WINDOW_MIN) : 5) * 60000;
-const MAX_CHASE  = process.env.MAX_CHASE_USD  != null ? Number(process.env.MAX_CHASE_USD)  : 2;
-const EPIC       = process.env.EPIC || "ETHUSD";
-// Exposición objetivo en USD (size × precio). Para ETH, 0.1 ≈ $160. Se usa para
-// escalar el size en OTROS instrumentos (BTC 0.1 = $6000 sería enorme).
-const NOTIONAL   = process.env.BOT_NOTIONAL_USD != null ? Number(process.env.BOT_NOTIONAL_USD) : 160;
-
-// --- TOPES DUROS: hasta ahora `freno` solo AVISABA (sonido/Telegram) pero nada
-// impedía que se abriera la orden igual. Acá el bloqueo es MECÁNICO: si se pasa
-// el tope, el bot RECHAZA el ✅ antes de llamar a capital_order.cjs. Mismos
-// valores por defecto que capital_freno.cjs, para que avisen y bloqueen igual.
-const MAX_POS       = process.env.MAX_POS != null ? Number(process.env.MAX_POS) : 2;
-const DAILY_MAX_LOSS = process.env.DAILY_MAX_LOSS != null ? Number(process.env.DAILY_MAX_LOSS) : 20;
-const ACCOUNT_CB    = process.env.ACCOUNT || "USD 2";
-
-// Devuelve null si puede operar, o un string con el motivo del bloqueo.
-async function chequearTopesDuros() {
-    try {
-        await capital.selectAccount(ACCOUNT_CB, { demo: MODE === "DEMO" });
-        const positions = await capital.getPositions({ demo: MODE === "DEMO" });
-        if ((positions || []).length >= MAX_POS) {
-            return `🔴 TOPE DURO: ya tienes ${positions.length} posiciones abiertas (máx ${MAX_POS}). No abro otra — cierra o espera antes de sumar riesgo.`;
-        }
-        const r = await capital.apiCall("GET", "/api/v1/history/transactions?lastPeriod=86400", { demo: MODE === "DEMO" });
-        const tx = ((r.data && r.data.transactions) || []).filter(t => t.transactionType === "TRADE" && /clos/i.test(t.note || ""));
-        const netHoy = tx.reduce((s, t) => s + Number(t.size), 0);
-        if (netHoy <= -DAILY_MAX_LOSS) {
-            return `🔴 TOPE DURO: pérdida del día ya en $${netHoy.toFixed(2)} (límite -$${DAILY_MAX_LOSS}). Se acabó operar por hoy — mañana con la cabeza fresca.`;
-        }
-        return null;
-    } catch (e) {
-        // si no se puede verificar, MEJOR bloquear que operar a ciegas
-        return `⚠️ No pude verificar los topes (${e.message}) — por seguridad, no ejecuto. Reintenta o revisa a mano.`;
-    }
-}
-
-// Tamaño por instrumento: BOT_SIZE_<EPIC> fija; ETHUSD usa SIZE; otros = notional/precio.
-function sizeFor(epic, price, minDeal) {
-    const ov = process.env["BOT_SIZE_" + epic];
-    if (ov != null) return Number(ov);
-    if (epic === "ETHUSD" || !price) return SIZE;
-    let s = NOTIONAL / price;
-    if (minDeal) s = Math.max(minDeal, Math.round(s / minDeal) * minDeal);
-    return +s.toFixed(6);
-}
 
 // -----------------------------------------------------------------------------
 function loadEnv(filePath) {
@@ -110,18 +53,55 @@ const TOKEN = ENV.TELEGRAM_BOT_TOKEN;
 const CHAT  = ENV.TELEGRAM_CHAT_ID;
 const API   = `https://api.telegram.org/bot${TOKEN}`;
 
+// --- Mantenedor: control de la autocompra (compartido con binance_autoexec) ---
+const CONTROL_FILE  = path.join(HOME, "Trading", "control", "autoexec_control.json");
+const MANT_LOG      = "/tmp/vero_mantenedor.log";
+const SIZE_CAP_HARD = 0.02;
+function leerControlAuto() {
+    try { return JSON.parse(fs.readFileSync(CONTROL_FILE, "utf8")); }
+    catch (e) { return { enabled: true, auto_size: 0.005, max_size: SIZE_CAP_HARD }; }
+}
+function guardarControlAuto(patch) {
+    const c = leerControlAuto();
+    const n = Object.assign({}, c, patch, { updated_by: "vero", updated_at: new Date().toISOString() });
+    fs.mkdirSync(path.dirname(CONTROL_FILE), { recursive: true });
+    fs.writeFileSync(CONTROL_FILE, JSON.stringify(n, null, 2));
+    try { fs.appendFileSync(MANT_LOG, `${new Date().toISOString()} ${JSON.stringify(patch)}\n`); } catch (e) {}
+    return n;
+}
+async function panelMantenedor() {
+    const c = leerControlAuto();
+    let usdtLibre = "?", posEth = "0", comis = "\u2014";
+    try {
+        const bals = await binance.getBalances();
+        usdtLibre = Number((bals.find(b => b.asset === "USDT") || { free: 0 }).free).toFixed(2);
+        const eth = bals.find(b => b.asset === "ETH");
+        posEth = eth ? Number(eth.locked || 0).toFixed(5) : "0";
+        const tr = await binance.getMyTrades("ETHUSDT", 5);
+        const ult = tr && tr.length ? tr[tr.length - 1] : null;
+        comis = ult ? ult.commissionAsset : "\u2014";
+    } catch (e) {}
+    const on = c.enabled !== false;
+    return `\u2699\ufe0f <b>Mantenedor autocompra</b>\n`
+        + `Estado: ${on ? "\ud83d\udfe2 ACTIVA" : "\u23f8 PAUSADA"}\n`
+        + `Size: <b>${c.auto_size} ETH</b> (tope ${c.max_size})\n`
+        + `USDT libre (Spot): ${usdtLibre}\n`
+        + `ETH en OCO abierto: ${posEth}\n`
+        + `\u00daltima comisi\u00f3n: ${comis === "BNB" ? "\u2705 BNB (descuento activo)" : comis}`;
+}
+function botonesMantenedor() {
+    return { inline_keyboard: [[
+        { text: "\u23f8 Pausar",   callback_data: "mant:pausar" },
+        { text: "\u25b6\ufe0f Reanudar", callback_data: "mant:reanudar" },
+    ]] };
+}
+
 function ts() { return new Date().toISOString().slice(11, 19); }
 async function tg(method, body) {
     const r = await fetch(`${API}/${method}`, {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
     });
     return r.json();
-}
-async function sendButtons(id, text) {
-    return tg("sendMessage", { chat_id: CHAT, text, reply_markup: { inline_keyboard: [[
-        { text: "✅ Comprar", callback_data: "buy:" + id },
-        { text: "❌ Paso",    callback_data: "skip:" + id },
-    ]]}});
 }
 
 // -----------------------------------------------------------------------------
@@ -137,7 +117,6 @@ function estadoAplus() {
     } catch (e) { return "⚠️ No pude leer los datos ahora. Intenta de nuevo en unos segundos."; }
     const [P, E9, E21, R, M5, M2, ER, VR, VA, AT] = v1.split("|").map(Number);
     const ER5 = Number(v5.split("|")[6]);
-    const capBuy = P + 1.75;   // ask Capital ≈ Binance + spread
     let verd;
     if (VA < 50)            verd = "🔕 Mercado muerto (sin liquidez) — nada que hacer.";
     else if (ER < 0.30)     verd = "🔕 Choppy — sin tendencia clara en 1m. Espera.";
@@ -150,11 +129,10 @@ function estadoAplus() {
         if (VR < 1.0)             falta.push(`más volumen (volr ${num(VR)})`);
         if (M5 < 0.6 * AT)        falta.push("impulso del rebote");
         verd = falta.length === 0
-            ? "🟢 ALINEADO — todo en su lugar. Si arma, te llega la señal con botones ✅/❌."
+            ? "🟢 ALINEADO — todo en su lugar. Si arma, te llega la alerta A+ y la autocompra la toma."
             : "🟡 Se está armando. Falta: " + falta.join(", ") + ".";
     }
-    return `📊 <b>ETH $${num(P)}</b> (Binance)\n`
-         + `En Capital comprar ≈ $${num(capBuy)}\n\n`
+    return `📊 <b>ETH $${num(P)}</b> (Binance)\n\n`
          + `RSI ${num(R,0)} · ER1 ${num(ER)} · ER5 ${num(ER5)}\n`
          + `EMA9 ${E9 > E21 ? "▲ sobre" : "▼ bajo"} EMA21 · volr ${num(VR)} · vol ${num(VA,0)}\n\n`
          + verd;
@@ -180,21 +158,8 @@ function estadoBTC() {
     } catch (e) { return "⚠️ No pude leer BTC ahora."; }
 }
 
-// Comando "posicion": ¿hay algo abierto en Capital y cómo va?
-async function posicionCapital() {
-    try {
-        const { positions, pnl } = await capital.getEthPosition({ demo: false, epic: "ETHUSD", account: "USD 2" });
-        if (!positions.length) return "📭 Sin posiciones abiertas en ETH (Capital).";
-        return `📈 <b>${pnl.count} lote(s) ETH abiertos</b>\n`
-             + `Entrada prom: ${pnl.weightedAvgEntry}\n`
-             + `P&L: ${fmt(pnl.unrealizedPnl)} USD (${fmt(pnl.pnlPct)}%)\n`
-             + `Bid ahora: ${pnl.bid}`
-             + (pnl.count > 2 ? `\n\n⚠️ ${pnl.count} lotes — pasaste el máx sano (2). Cuidado con sobre-operar.` : "");
-    } catch (e) { return "⚠️ No pude leer tu posición: " + e.message; }
-}
-
 // Comando "binance": posición spot en Binance (donde opera el auto), P&L, protección OCO
-// y si la auto-ejecución está encendida. Cierra el hueco de "posicion" (que solo ve Capital).
+// y si la auto-ejecución está encendida.
 async function estadoBinance() {
     try {
         const SYM = "ETHUSDT", B = "ETH";
@@ -238,12 +203,6 @@ async function estadoBinance() {
         } catch (e) {}
         return t;
     } catch (e) { return "⚠️ No pude leer Binance: " + e.message; }
-}
-
-// Comando "reporte": resumen del día (reusa capital_reporte.cjs).
-function reporteDia() {
-    try { return execSync(`"${NODE}" scripts/capital_reporte.cjs`, { cwd: DIR }).toString().trim(); }
-    catch (e) { return "⚠️ No pude generar el reporte ahora."; }
 }
 
 // Comando "zonas": niveles S/R vigentes, relativos al precio actual.
@@ -332,68 +291,14 @@ function registrarNota(textoOriginal) {
 }
 
 // -----------------------------------------------------------------------------
-// Ejecuta la compra reusando capital_order.cjs buy (todos los guardrails y el
-// bracket real en precio Capital). Devuelve {ok, msg}.
-// -----------------------------------------------------------------------------
-function ejecutarCompra(epic, size) {
-    const args = ["scripts/capital_order.cjs", "buy", "--size", String(size || SIZE), "--epic", epic || EPIC];
-    if (MODE === "DEMO") args.push("--demo", "--live", "--yes");
-    else if (MODE === "LIVE") args.push("--live", "--yes");
-    // DRY-RUN: sin --live → capital_order imprime lo que haría, no opera
-    try {
-        const out = execFileSync(NODE, args, { cwd: DIR, encoding: "utf8" });
-        const ok = /LONG ABIERTO|\[DRY-RUN\]/.test(out);
-        const linea = out.split("\n").find(l => /LONG ABIERTO|RECHAZAD|\[DRY-RUN\]/i.test(l))
-            || out.trim().split("\n").slice(-1)[0];
-        return { ok, msg: (MODE === "DRY-RUN" ? "[DRY-RUN] " : "") + (linea || "sin salida").trim() };
-    } catch (e) {
-        const o = (e.stdout || "") + (e.stderr || e.message || "");
-        return { ok: false, msg: "No se ejecutó: " + String(o).replace(/\s+/g, " ").trim().slice(0, 200) };
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Estado de la señal pendiente
-// -----------------------------------------------------------------------------
-const pendings = new Map();    // id → {id, ts, entry, epic, msgId} (varias señales a la vez)
-const enviados = new Set();    // ids ya mandados (no re-enviar)
-
-// Revisa los archivos pending (uno por instrumento); si hay una señal NUEVA, manda botones.
-async function revisarPending() {
-    for (const file of pendingFiles()) {
-        try { await procesarPending(JSON.parse(fs.readFileSync(file, "utf8"))); } catch (e) {}
-    }
-}
-async function procesarPending(data) {
-    if (!data || !data.id) return;
-    if (enviados.has(data.id)) return;                       // ya la mandamos, no repetir
-    // No mandar señales viejas (ej. pending que quedó de antes): solo dentro de la ventana
-    const edad = Date.now() - (data.ts || 0);
-    if (edad > WINDOW_MS) { enviados.add(data.id); return; }
-
-    const entry = Number(data.entry);
-    const epic  = data.epic || EPIC;
-    const szDisplay = sizeFor(epic, entry, null);
-    const stopHint = data.stop ? ` · stop ~${data.stop}` : "";
-    const tpHint   = data.tp ? ` · objetivo ~${data.tp}` : "";
-    const txt = `🟢 SEÑAL A+ · ${epic}\n`
-        + `entrada ~${entry}${stopHint}${tpHint} · size ~${szDisplay}\n`
-        + `Ventana: ${Math.round(WINDOW_MS / 60000)} min. ¿Confirmas la compra?`;
-    const r = await sendButtons(data.id, txt);
-    enviados.add(data.id);
-    pendings.set(data.id, { id: data.id, ts: data.ts || Date.now(), entry, epic: data.epic || EPIC, msgId: r.result && r.result.message_id });
-    console.log(`${ts()} 📨 señal ${data.id} enviada a Telegram (entrada ~${entry})`);
-}
-
-// -----------------------------------------------------------------------------
-// Loop de escucha (long polling) + revisión de pending
+// Loop de escucha (long polling): comandos y mantenedor
 // -----------------------------------------------------------------------------
 let offset = 0;
 const manejados = new Set();
 
 async function poll() {
     const upd = await tg("getUpdates", { offset, timeout: 8, allowed_updates: ["callback_query", "message"] });
-    if (!upd.ok) { console.log(`${ts()} getUpdates error`); await capital.sleep(2000); return; }
+    if (!upd.ok) { console.log(`${ts()} getUpdates error`); await sleep(2000); return; }
     for (const u of upd.result || []) {
         offset = u.update_id + 1;
 
@@ -404,7 +309,6 @@ async function poll() {
             let respuesta = null;
             if (t === "estado" || t === "status" || t === "eth")        respuesta = estadoAplus();
             else if (t === "btc" || t === "bitcoin")                    respuesta = estadoBTC();
-            else if (t === "posicion" || t === "posición" || t === "pos") respuesta = await posicionCapital();
             else if (t === "binance" || t === "bnb" || t === "bn")      respuesta = await estadoBinance();
             else if (t === "reporte" || t === "report")                respuesta = await estadoBinance();
             else if (t === "zonas" || t === "zona")                     respuesta = zonasStr();
@@ -421,6 +325,28 @@ async function poll() {
                 respuesta = "⚖️ Corriendo la revisión de la config… te llega el veredicto en ~1 min.";
                 execFile("/bin/bash", ["scripts/recalibracion_semanal.sh"], { cwd: DIR, maxBuffer: 12 * 1024 * 1024 }, () => {});
             }
+            else if (t === "auto" || t === "mantenedor" || t === "control") {
+                const panel = await panelMantenedor();
+                try { await tg("sendMessage", { chat_id: CHAT, text: panel, parse_mode: "HTML", reply_markup: botonesMantenedor() }); }
+                catch (e) { console.log(`${ts()} err auto: ${e.message}`); }
+                continue;
+            }
+            else if (t === "pausar" || t === "pause") {
+                guardarControlAuto({ enabled: false });
+                respuesta = "\u23f8 <b>Autocompra PAUSADA.</b> No se abren entradas NUEVAS.\n\u26a0\ufe0f Las posiciones abiertas siguen \u2014 su TP/OCO las maneja.";
+            }
+            else if (t === "reanudar" || t === "resume" || t === "activar") {
+                const c = guardarControlAuto({ enabled: true });
+                respuesta = `\u25b6\ufe0f <b>Autocompra ACTIVA.</b> size=${c.auto_size} ETH.`;
+            }
+            else if (t.startsWith("size ")) {
+                const v = Number(t.split(/\s+/)[1].replace(",", "."));
+                const c0 = leerControlAuto();
+                const cap = Number(c0.max_size) > 0 ? c0.max_size : SIZE_CAP_HARD;
+                if (!(v > 0))     respuesta = "\u26a0\ufe0f Size inv\u00e1lido. Ej: <b>size 0.003</b>";
+                else if (v > cap) respuesta = `\u26d4 ${v} supera el tope duro ${cap} ETH. No lo cambio.`;
+                else { const c = guardarControlAuto({ auto_size: v }); respuesta = `\u2705 Size = <b>${c.auto_size} ETH</b>. Aplica a la pr\u00f3xima entrada.`; }
+            }
             else if (/^sal[ií]\b/.test(t))                              respuesta = registrarSalida(u.message.text);
             else if (/^nota\b/.test(t))                                 respuesta = registrarNota(u.message.text);
             else if (t === "ayuda" || t === "help" || t === "comandos")
@@ -428,6 +354,7 @@ async function poll() {
                     + "📊 <b>estado</b> · <b>btc</b> · <b>binance</b> · <b>reporte</b> (Binance) · <b>zonas</b>\n"
                     + "🎯 <b>score</b> — rinde vs backtest · 🔭 <b>casi</b> — casi-señales de hoy\n"
                     + "⏰ <b>horas</b> — mejores horas · ⚖️ <b>recalibrar</b> — revisa la config\n"
+                    + "⚙️ <b>auto</b> — panel autocompra · <b>pausar</b> / <b>reanudar</b> / <b>size 0.003</b>\n"
                     + "🔴 <b>salí 1794</b> — registra una salida · 📝 <b>nota …</b> — deja el porqué";
             if (respuesta) {
                 console.log(`${ts()} 💬 comando ${t}`);
@@ -443,74 +370,28 @@ async function poll() {
             await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "No autorizado" }); continue;
         }
         const [action, id] = String(cq.data).split(":");
-        if (manejados.has(id)) { await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Ya procesado" }); continue; }
-        manejados.add(id);
-
-        if (action === "skip") {
-            await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Cancelado ❌" });
-            await tg("editMessageText", { chat_id: CHAT, message_id: cq.message.message_id, text: cq.message.text + "\n\n❌ CANCELADO por ti." });
-            console.log(`${ts()} ❌ PASO (id ${id})`);
-            pendings.delete(id);
+        if (action === "mant") {
+            const on = id === "reanudar";
+            const c = guardarControlAuto({ enabled: on });
+            await tg("answerCallbackQuery", { callback_query_id: cq.id, text: on ? "Reanudada \u25b6\ufe0f" : "Pausada \u23f8" });
+            const panel = await panelMantenedor();
+            try { await tg("editMessageText", { chat_id: CHAT, message_id: cq.message.message_id, text: panel, parse_mode: "HTML", reply_markup: botonesMantenedor() }); } catch (e) {}
+            console.log(`${ts()} \u2699\ufe0f mantenedor -> ${on ? "ACTIVA" : "PAUSA"} (size ${c.auto_size})`);
             continue;
         }
-        if (action !== "buy") continue;
-
-        await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Verificando..." });
-        console.log(`${ts()} ✅ COMPRAR (id ${id}) — modo ${MODE}`);
-
-        // TOPES DUROS: se chequean ANTES de cualquier otra cosa, incluso antes de
-        // mirar la ventana/precio. Si un tope está pasado, no se ejecuta — punto.
-        if (!test && (MODE === "LIVE" || MODE === "DEMO")) {
-            const bloqueo = await chequearTopesDuros();
-            if (bloqueo) {
-                await tg("editMessageText", { chat_id: CHAT, message_id: cq.message.message_id, text: cq.message.text + "\n\n" + bloqueo });
-                console.log(`${ts()}   → BLOQUEADO por tope duro: ${bloqueo}`);
-                pendings.delete(id);
-                continue;
-            }
-        }
-
-        const pend = pendings.get(id);
-        let res;
-        if (test) {
-            res = ejecutarCompra(EPIC);   // en test igual ejecuta (dry-run si no hay --live)
-        } else if (!pend) {
-            res = { ok: false, msg: "Señal ya no está activa." };
-        } else if (Date.now() - pend.ts > WINDOW_MS) {
-            res = { ok: false, msg: `Caducó (pasaron más de ${Math.round(WINDOW_MS/60000)} min).` };
-        } else {
-            // no perseguir: el precio no debe haberse ido > MAX_CHASE sobre la entrada de la señal.
-            // MAX_CHASE se escala al instrumento (BTC ~$60k no puede usar $2 fijo).
-            try {
-                const pending = pend;
-                const mkt = await capital.getMarket(pending.epic, { demo: MODE === "DEMO" });
-                const chaseLimit = Math.max(MAX_CHASE, pending.entry * 0.0013);   // ~0.13% del precio
-                if (mkt.offer > pending.entry + chaseLimit) {
-                    res = { ok: false, msg: `Ya se fue (${mkt.offer} > entrada+${chaseLimit.toFixed(2)}). No persigo.` };
-                } else {
-                    const sz = sizeFor(pending.epic, mkt.offer, mkt.minDealSize);
-                    res = ejecutarCompra(pending.epic, sz);
-                }
-            } catch (e) { res = { ok: false, msg: "Error validando precio: " + e.message }; }
-        }
-        await tg("editMessageText", { chat_id: CHAT, message_id: cq.message.message_id,
-            text: cq.message.text + "\n\n" + (res.ok ? "✅ " : "⚠️ ") + res.msg });
-        console.log(`${ts()}   → ${res.msg}`);
-        pendings.delete(id);
+        // Cualquier otro callback es de un mensaje viejo (la ruta de botones de
+        // compra se retiró con el bróker viejo): se acusa recibo y nada más.
+        if (manejados.has(id)) { await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Ya procesado" }); continue; }
+        manejados.add(id);
+        await tg("answerCallbackQuery", { callback_query_id: cq.id, text: "Botón retirado — la compra la maneja /auto" });
     }
 }
 
 (async () => {
     if (!TOKEN || !CHAT) { console.error("Faltan credenciales de Telegram"); process.exit(1); }
-    console.log(`${ts()} bot de confirmación arrancado · modo ${MODE} · size ${SIZE} · ventana ${Math.round(WINDOW_MS/60000)}min${test ? " · TEST" : ""}`);
-
-    if (test) {
-        // señal de prueba: escribe un pending falso para ejercitar todo el flujo
-        fs.writeFileSync(PENDING_FILE, JSON.stringify({ id: "test-" + Math.floor(Date.now()/1000), ts: Date.now(), epic: "ETHUSD", entry: 1600, stop: 1594, tp: 1608 }));
-    }
+    console.log(`${ts()} bot arrancado · modo ${MODE}`);
 
     while (true) {
-        try { await revisarPending(); } catch (e) { console.log(`${ts()} err pending: ${e.message}`); }
-        try { await poll(); } catch (e) { console.log(`${ts()} err poll: ${e.message}`); await capital.sleep(2000); }
+        try { await poll(); } catch (e) { console.log(`${ts()} err poll: ${e.message}`); await sleep(2000); }
     }
 })();

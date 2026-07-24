@@ -15,23 +15,24 @@
 //
 // NO toca posiciones ni arma órdenes. Solo alerta en TRANSICIONES de estado.
 //
+// "Estar dentro" se lee de BINANCE SPOT: tener saldo del activo base sobre el mínimo
+// vendible = posición abierta (spot no tiene "posiciones" como el CFD).
+//
 // Uso:  node scripts/continuacion_monitor.cjs
-// Env:  SYMBOL (default ETHUSDT), EPIC (default ETHUSD), INTERVAL (seg, default 30),
-//       ER_MIN (0.30), RSI_LO (55), RSI_HI (72), RSI_OB (73), ACCOUNT ("USD 2"), DEMO=1.
+// Env:  SYMBOL (default ETHUSDT), INTERVAL (seg, default 30),
+//       ER_MIN (0.30), RSI_LO (55), RSI_HI (72), RSI_OB (73).
 // =============================================================================
 
 const { execFileSync } = require("child_process");
 const path = require("path");
-const capital = require("./capital_client.cjs");
+const bn = require("./binance_client.cjs");
 
 const HOME = process.env.HOME;
 const DIR  = path.join(HOME, "Trading", "tradingview-mcp");
 const NODE = process.execPath;
 
-const demo = process.argv.includes("--demo");
 const SYMBOL   = process.env.SYMBOL || "ETHUSDT";
-const EPIC     = process.env.EPIC || "ETHUSD";
-const ACCOUNT  = process.env.ACCOUNT || "USD 2";
+const BASE     = process.env.BASE || SYMBOL.replace(/USDT$/, "");
 const INTERVAL = (process.env.INTERVAL ? Number(process.env.INTERVAL) : 30) * 1000;
 const ER_MIN = Number(process.env.ER_MIN || 0.30);
 const RSI_LO = Number(process.env.RSI_LO || 55);
@@ -153,12 +154,13 @@ async function tick() {
     const x = leerIndicadores();
     if (!x.p) { console.log(`${ts()} sin datos`); return; }
 
-    // ¿tiene long abierto en este epic?
+    // ¿está dentro? En spot = tener saldo de BASE sobre el mínimo vendible.
     let enPosicion = false;
     try {
-        await capital.selectAccount(ACCOUNT, { demo });
-        const pos = await capital.getPositions({ demo, epic: EPIC });
-        enPosicion = pos.some(p => p.direction === "BUY");
+        const rules = await bn.getSymbolRules(SYMBOL);
+        const bal   = (await bn.getBalances()).find(b => b.asset === BASE);
+        const qty   = bal ? Number(bal.free) + Number(bal.locked || 0) : 0;
+        enPosicion  = qty >= Number(rules.minQty || rules.stepSize || 0);
     } catch (e) { /* si la API falla, seguimos con enPosicion=false */ }
 
     const { alerts, log, suppressed } = decide(x, enPosicion);
@@ -172,7 +174,7 @@ module.exports = { estadoTendencia, decide, _reset,
 
 if (require.main === module) {
     (async () => {
-        console.log(`${ts()} monitor de continuación activo — ${SYMBOL}/${EPIC}, ER≥${ER_MIN} (salida ${ (ER_MIN - ER_EXIT).toFixed(2) }), RSI viva ${RSI_LO}-${RSI_HI}, sobrecompra ≥${RSI_OB}, confirmación ${CONFIRM_N} lecturas, cooldown ${COOLDOWN_MS / 60000}min, cada ${INTERVAL / 1000}s`);
+        console.log(`${ts()} monitor de continuación activo — ${SYMBOL}, ER≥${ER_MIN} (salida ${ (ER_MIN - ER_EXIT).toFixed(2) }), RSI viva ${RSI_LO}-${RSI_HI}, sobrecompra ≥${RSI_OB}, confirmación ${CONFIRM_N} lecturas, cooldown ${COOLDOWN_MS / 60000}min, cada ${INTERVAL / 1000}s`);
         for (;;) {
             try { await tick(); }
             catch (e) { console.log(`${ts()} err: ${e.message}`); }

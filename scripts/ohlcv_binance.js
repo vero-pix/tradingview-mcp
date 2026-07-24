@@ -1,9 +1,7 @@
 #!/usr/bin/env node
 // Trae OHLCV de Binance (con VOLUMEN REAL) para el detector de entradas.
-// Motivo: el chart de Capital.com (CAPITALCOM:ETHUSD) es un feed de CFD que NO
-// entrega volumen en TradingView (siempre devuelve 1). El precio ETH spot es
-// prácticamente idéntico entre Capital.com y Binance, así que detectamos la
-// señal con datos de Binance y Vero sigue OPERANDO en Capital.com.
+// Binance es la fuente única del sistema: el mismo feed que se detecta es el que
+// se opera (spot), así que no hay traducción de precios ni desfase entre venues.
 //
 // Salida: mismo formato que `tv ohlcv` -> {bars:[{time,open,high,low,close,volume}]}
 // para que scripts/calc_indicators.js lo consuma sin cambios.
@@ -34,7 +32,7 @@ async function fetchOnce(host) {
       time: Math.floor(k[0] / 1000),
       open: +k[1], high: +k[2], low: +k[3], close: +k[4], volume: +k[5],
     }));
-    // sanidad: el volumen debe ser real (no el placeholder 1 de Capital.com)
+    // sanidad: el volumen debe ser real (no un placeholder de 1 por barra)
     const totalVol = bars.reduce((a, b) => a + b.volume, 0);
     if (!(totalVol > bars.length)) throw new Error('volumen sospechoso (placeholder?)');
     return bars;

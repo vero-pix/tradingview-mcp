@@ -34,7 +34,7 @@ ZONES_STATE="{}"                       # estado previo por nivel (para detectar 
 # --- Multi-instrumento: configurable por env (default ETH). Para BTC:
 #     BINANCE_SYMBOL=BTCUSDT EPIC=BTCUSD ZONAS_FILE=scripts/zonas_BTCUSD.env LIQ_MIN=8 ---
 SYMBOL="${BINANCE_SYMBOL:-ETHUSDT}"          # símbolo Binance
-EPIC="${EPIC:-ETHUSD}"                        # epic Capital (para el bot)
+EPIC="${EPIC:-ETHUSD}"                        # etiqueta del instrumento en los .jsonl
 ZONAS_FILE="${ZONAS_FILE:-scripts/zonas.env}"
 LIQ_MIN="${LIQ_MIN:-50}"                      # volumen absoluto mínimo (asset-específico)
 # ADAPTATIVO al régimen: los umbrales se miden en MÚLTIPLOS DE ATR (la volatilidad
@@ -58,9 +58,8 @@ SILENT="${SILENT:-0}"                          # 1 = shadow: NO manda alertas Te
 notify_maybe() { [ "${SILENT:-0}" = "1" ] || ./scripts/notify.sh "$@"; }
 
 while true; do
-  # Datos desde Binance (volumen REAL). El feed de Capital.com en TV no entrega
-  # volumen (siempre 1); ver scripts/ohlcv_binance.js. Vero sigue OPERANDO en
-  # Capital.com — solo la DETECCIÓN de la señal usa datos de Binance.
+  # Datos desde Binance (precio + volumen REAL); ver scripts/ohlcv_binance.js.
+  # Binance es la única fuente y el único lugar donde se opera.
   VAL=$(BINANCE_SYMBOL="$SYMBOL" "$NODE" scripts/ohlcv_binance.js 2>/dev/null | "$NODE" scripts/calc_indicators.js)
   P=$(echo "$VAL"|cut -d'|' -f1); E9=$(echo "$VAL"|cut -d'|' -f2); E21=$(echo "$VAL"|cut -d'|' -f3)
   R=$(echo "$VAL"|cut -d'|' -f4); M5=$(echo "$VAL"|cut -d'|' -f5); M2=$(echo "$VAL"|cut -d'|' -f6); ER=$(echo "$VAL"|cut -d'|' -f7); VR=$(echo "$VAL"|cut -d'|' -f8); VA=$(echo "$VAL"|cut -d'|' -f9); AT=$(echo "$VAL"|cut -d'|' -f10)
@@ -142,19 +141,8 @@ while true; do
     printf '{"ts":%s,"fecha":"%s","symbol":"%s","epic":"%s","entry":%s,"sl":%s,"tp":%s,"atr":%s,"rsi":%s,"er":%s,"volr":%s,"regimen":"%s"}\n' \
       "$(( $(date +%s) * 1000 ))" "$(date '+%Y-%m-%d %H:%M:%S')" "$SYMBOL" "$EPIC" "$P" "$SL" "$TP" "$AT" "$R" "$ER" "$VR" "$REGIMEN" \
       >> "$SIG_FILE"
-    # Armar orden (opcional, default OFF): escribe la señal para el bot de Telegram,
-    # que le manda a Vero los botones ✅/❌. Se activa con ARM_ORDER=1 en el entorno.
-    # NO ejecuta nada acá: el bot ejecuta solo si Vero toca ✅. Precios traducidos a
-    # Capital.com (Binance − offset ~3) para el chequeo de no-perseguir del bot.
-    if [ "${ARM_ORDER:-0}" = "1" ]; then
-      OFF="${OFFSET:-3.0}"
-      SIG_TS=$(( $(date +%s) * 1000 ))
-      CAP_ENTRY=$("$NODE" -e "console.log(($P-$OFF).toFixed(2))")
-      CAP_SL=$("$NODE"    -e "console.log(($SL-$OFF).toFixed(2))")
-      CAP_TP=$("$NODE"    -e "console.log(($TP-$OFF).toFixed(2))")
-      printf '{"id":"sig%s","ts":%s,"epic":"%s","entry":%s,"stop":%s,"tp":%s}\n' \
-        "$SIG_TS" "$SIG_TS" "$EPIC" "$CAP_ENTRY" "$CAP_SL" "$CAP_TP" > "/tmp/vero_pending_${EPIC}.json"
-    fi
+    # La ejecución la toma binance_autoexec.cjs leyendo $SIG_FILE. El detector no
+    # arma órdenes ni traduce precios: Binance es el único precio y el único camino.
     cooldown=50   # ~5 min de silencio tras avisar
     pb=0
   else

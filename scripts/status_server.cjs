@@ -2,7 +2,7 @@
 // =============================================================================
 // status_server.cjs — API HTTP de SOLO LECTURA del sistema de trading, para VQL.
 //
-// Expone el estado del host que corre los detectores/bot/freno para que VQL
+// Expone el estado del host que corre los detectores/bot/guardianes para que VQL
 // (la interfaz) lo consuma por HTTP. NO ejecuta ni escribe NADA: solo lee
 // systemd/launchd, /proc o vm_stat, los logs /tmp/vero_*.log y los .jsonl.
 //
@@ -40,10 +40,7 @@ const SERVICE_MANIFEST = [
   { id: "detectoreth1h", desc: "Detector de tendencia ETH (1h)" },
   { id: "continuacion", desc: "Monitor de continuación (aguanta/toma ganancia)" },
   { id: "telegrambot", desc: "Bot de Telegram (confirmación de señales)" },
-  { id: "freno", desc: "Freno: topes de posiciones y riesgo" },
-  { id: "stopguard", desc: "Guardián de stops" },
-  { id: "tpguard", desc: "Guardián de take-profits" },
-  { id: "trailing", desc: "Trailing / breakeven" },
+  { id: "binanceautoexec", desc: "Auto-ejecución A+ en Binance" },
   { id: "binanceguard", desc: "Protege posiciones spot (sl/tp)" },
   { id: "binancetrailing", desc: "Trailing stop en Binance" },
   { id: "scoresenales", desc: "Score de calidad de señales" },

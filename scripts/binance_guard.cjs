@@ -2,7 +2,7 @@
 // =============================================================================
 // binance_guard.cjs — Guardián de posiciones Binance SPOT sin protección.
 //
-// El equivalente Binance del stopguard+tpguard de Capital, en uno. Binance spot no
+// Guardián de stop y take-profit en uno. Binance spot no
 // tiene "posiciones": tener ETH libre SIN una orden OCO de venta = posición desnuda
 // (comprada a mano en la app, sin stop ni take-profit). Este guardián la detecta y le
 // pone un bracket OCO (stop + TP) en el bróker, que se ejecuta aunque todo esté apagado.
@@ -27,6 +27,7 @@ const { execFileSync } = require("child_process");
 const fs   = require("fs");
 const path = require("path");
 const bn   = require("./binance_client.cjs");
+const earn = require("./lib/earn_net.cjs");   // red Earn→Spot compartida (lado venta)
 
 const HOME = process.env.HOME;
 const DIR  = path.join(HOME, "Trading", "tradingview-mcp");
@@ -54,6 +55,31 @@ function notify(title, msg, sound) {
     catch (e) {}
 }
 function appendTrade(obj) { try { fs.appendFileSync(DIARIO, JSON.stringify(obj) + "\n"); } catch (e) {} }
+
+// ¿Hay ETH escondido en Earn cuando el balance libre no da ni el mínimo? Este tick corre
+// cada INTERVAL (15s) y consultar Earn son llamadas sapi FIRMADAS: preguntarlo en cada
+// vuelta mientras Vero está flat sería quemar rate limit al pedo. Por eso va con throttle
+// (EARN_CHECK_SEC, def 240s). Devuelve true solo si algo se redimió y vale la pena reintentar.
+const EARN_CHECK_MS = (process.env.EARN_CHECK_SEC != null ? Number(process.env.EARN_CHECK_SEC) : 240) * 1000;
+let ultimoChequeoEarn = 0;
+async function rescatarDeEarn(rules) {
+    const ahora = Date.now();
+    if (ahora - ultimoChequeoEarn < EARN_CHECK_MS) return false;
+    ultimoChequeoEarn = ahora;
+
+    const { flexTotal, lockedTotal, err } = await earn.earnTotals(BASE);
+    if (err && flexTotal === 0) { console.log(`${ts()} ⚠️ no pude leer Earn ${BASE} (${err})`); return false; }
+    if (flexTotal + lockedTotal <= 0) return false;   // de verdad no hay posición
+
+    // Hay ETH en Earn: si es flexible lo redimimos; si está LOCKED, ensureSpotAsset
+    // avisa por Telegram (bloqueo real que Vero resuelve a mano en Binance).
+    const objetivo = Math.max(flexTotal, rules.minQty);
+    console.log(`${ts()} 🛟 ${BASE} fuera de Spot (flex ${flexTotal.toFixed(6)}, locked ${lockedTotal.toFixed(6)}) — posición escondida en Earn, la traigo`);
+    if (!live) { console.log(`${ts()}   [dry-run] redimiría ${objetivo.toFixed(6)} ${BASE}`); return false; }
+    const r = await earn.ensureSpotAsset(BASE, objetivo);
+    if (!r.ok) { console.log(`${ts()}   ⚠ ${r.msg}`); return false; }
+    return true;
+}
 
 // ATR(14) 1m del símbolo. Devuelve {precio, atr, rsi} o null.
 function readIndicators(sym) {
@@ -89,10 +115,21 @@ async function tick() {
     const balances = await bn.getBalances();
     const base     = balances.find(b => b.asset === BASE);
     const freeBase = base ? Number(base.free) : 0;
-    const sellQty  = bn.roundStep(freeBase, rules.stepSize);
+    let   sellQty  = bn.roundStep(freeBase, rules.stepSize);
 
     // ¿hay ETH vendible sobre el mínimo del par?
-    if (sellQty < rules.minQty) { console.log(`${ts()} sin ${BASE} vendible (libre ${freeBase})`); avisados.clear(); return; }
+    if (sellQty < rules.minQty) {
+        // OJO: "sin ETH libre" NO es lo mismo que "sin posición". Si Binance auto-suscribió
+        // el ETH a Simple Earn, la posición SIGUE EXISTIENDO pero desaparece del balance
+        // libre — y este guardián la daba por inexistente y se iba, dejándola sin bracket
+        // para siempre. Antes de rendirnos, miramos Earn y traemos lo que haya.
+        const rescatado = await rescatarDeEarn(rules);
+        if (!rescatado) { console.log(`${ts()} sin ${BASE} vendible (libre ${freeBase})`); avisados.clear(); return; }
+        const b2 = (await bn.getBalances()).find(b => b.asset === BASE);
+        sellQty  = bn.roundStep(b2 ? Number(b2.free) : 0, rules.stepSize);
+        if (sellQty < rules.minQty) { avisados.clear(); return; }
+        console.log(`${ts()} 🛟 ${BASE} rescatado de Earn: ahora hay ${sellQty} vendible — sigo y le pongo bracket`);
+    }
 
     const open = await bn.getOpenOrders(SYMBOL);
     const sells = (open || []).filter(o => o.side === "SELL");
@@ -141,6 +178,14 @@ async function tick() {
     }
 
     // LIVE: poner el OCO de venta.
+    // Red Earn→Spot antes de vender: si el auto-subscribe se llevó parte del ETH entre
+    // que lo contamos y ahora, el OCO rebotaría con -2010 (balance insuficiente) y la
+    // posición quedaría desnuda otro tick más. Redimir primero.
+    const redVenta = await earn.ensureSpotAsset(BASE, sellQty);
+    if (!redVenta.ok) {
+        console.log(`${ts()} ⚠ no pongo el OCO todavía: ${redVenta.msg}`);
+        return;   // sin ETH disponible no hay orden que poner; reintenta el próximo tick
+    }
     try {
         const oco = await bn.placeOcoSell(SYMBOL, sellQty, { tp, stop });
         console.log(`${ts()} ✅ OCO puesto — stop $${stop} / tp $${tp} (${sellQty} ${BASE}, entrada~${entry.toFixed(2)}, listId ${oco.orderListId})`);

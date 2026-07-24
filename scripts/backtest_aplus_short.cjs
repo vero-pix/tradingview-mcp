@@ -9,7 +9,7 @@
 //   - Rechazo con momentum a la baja (mom5 <= -0.6×ATR)
 //   - RSI 30-50 (banda espejo de la 50-70 del long)
 //   - Stop ARRIBA (2×ATR), Target ABAJO (2×ATR). SHORT SIEMPRE LLEVA STOP.
-// Descuenta el spread real de Capital. Filtro de humo: ¿vale la pena o es trampa?
+// Descuenta el costo de operar. Filtro de humo: ¿vale la pena o es trampa?
 //
 // Uso:
 //   node scripts/backtest_aplus_short.cjs                 # ETH, ~3000 velas 1m

@@ -6,13 +6,13 @@
 // los MISMOS datos, para hallar una versión que dispare 1-3 señales/día CON edge
 // real (profit factor ≥ 1.3). Reutiliza las fórmulas y la simulación de trade de
 // backtest_aplus.cjs (mismo stop/target 2×ATR). Modelo de costo Binance por
-// defecto (comisión % + tick); --spread vuelve al modelo viejo de Capital.
+// defecto (comisión % + tick); --spread vuelve al modelo viejo de spread fijo.
 //
 // Uso:
 //   node scripts/backtest_aplus_sweep.cjs                       # ETH, taker 0.1%
 //   node scripts/backtest_aplus_sweep.cjs --symbol ETHUSDT --fee 0.00075  # con BNB
 //   node scripts/backtest_aplus_sweep.cjs --symbol BTCUSDT --fee 0.001
-//   node scripts/backtest_aplus_sweep.cjs --spread 1.75         # fallback Capital
+//   node scripts/backtest_aplus_sweep.cjs --spread 1.75         # fallback spread fijo
 //   node scripts/backtest_aplus_sweep.cjs --min-day 1 --max-day 4 --min-pf 1.3
 //
 // Ordena por profit factor los combos que caen en la ventana de frecuencia útil.
@@ -23,10 +23,10 @@ function flag(n, d) { const i = argv.indexOf(n); return i !== -1 ? argv[i + 1] :
 const SYMBOL = flag("--symbol", "ETHUSDT");
 const NBARS  = Number(flag("--bars", "5000"));
 // ---- modelo de costo (R-006: recalibrar A+ a la economía de Binance) ----
-// Binance cobra COMISIÓN PORCENTUAL (no spread fijo como Capital): fee por lado
+// Binance cobra COMISIÓN PORCENTUAL (no spread fijo como un CFD): fee por lado
 // sobre el nocional + spread real (~1 tick). --spread queda como fallback al
-// modelo viejo de Capital (spread fijo en dólares).
-const USE_SPREAD = flag("--spread", null) != null;            // fallback: modelo Capital
+// modelo viejo de spread fijo en dólares.
+const USE_SPREAD = flag("--spread", null) != null;            // fallback: spread fijo
 const SPREAD = USE_SPREAD ? Number(flag("--spread", null)) : (SYMBOL.startsWith("BTC") ? 50 : 1.75);
 const FEE    = Number(flag("--fee", "0.001"));                // comisión por lado (0.001 = 0.1% taker)
 const TICK   = flag("--tick", null) != null ? Number(flag("--tick", null)) : (SYMBOL.startsWith("BTC") ? 0.1 : 0.01); // spread real ~1 tick
@@ -107,7 +107,7 @@ function evalConfig(bars, feat, cfg) {
             }
             if (out != null) {
                 // Costo Binance: fee% sobre entrada+salida + spread real (tick).
-                // Con --spread se usa el modelo viejo de Capital (spread fijo).
+                // Con --spread se usa el modelo viejo de spread fijo.
                 const cost = USE_SPREAD ? SPREAD : FEE * (entry + out) + TICK;
                 trades.push((out - entry) - cost); cooldownUntil = i + 6; pb = 0;
             }
@@ -128,7 +128,7 @@ function evalConfig(bars, feat, cfg) {
     if (bars.length < 300) { console.error("Pocas velas (" + bars.length + ")"); process.exit(1); }
     const dias = ((bars[bars.length - 1].time - bars[0].time) / 86400000) || 1;
     const costoDesc = USE_SPREAD
-        ? `Costo: spread fijo $${SPREAD} (fallback Capital)`
+        ? `Costo: spread fijo $${SPREAD} (fallback)`
         : `Costo: fee ${(FEE * 100).toFixed(3)}%/lado + tick $${TICK}`;
     console.log(`Velas: ${bars.length} (~${dias.toFixed(1)} días). ${costoDesc}. Ventana útil: ${MIN_DAY}-${MAX_DAY} señales/día.`);
     console.log(`Precalculando indicadores...`);

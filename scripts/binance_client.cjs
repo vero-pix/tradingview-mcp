@@ -1,7 +1,7 @@
 // =============================================================================
 // binance_client.cjs — Cliente REST de Binance Spot (LECTURA + ÓRDENES)
 //
-// Gemelo de capital_client.cjs pero para Binance. Firma cada request protegido
+// Cliente de la API de Binance. Firma cada request protegido
 // con HMAC-SHA256 (API key + secret) y expone precio, balances, órdenes, OCO
 // (stop + take-profit en UNA orden nativa) y trades cerrados.
 //
@@ -31,7 +31,7 @@ const HOST_TESTNET = "testnet.binance.vision";
 const RECV_WINDOW  = 5000;   // ms de tolerancia del reloj para requests firmados
 
 // -----------------------------------------------------------------------------
-// Credenciales desde ~/Trading/.env.binance (mismo parser que capital_client)
+// Credenciales desde ~/Trading/.env.binance
 // -----------------------------------------------------------------------------
 function loadEnv(filePath) {
     const env = {};
@@ -236,10 +236,19 @@ async function redeemFlexibleEarn(productId, amount) {
     });
 }
 
+// Posición LOCKED (staking/plazo fijo): NO es redimible al instante. Sirve para
+// DISTINGUIR el auto-subscribe flexible (que sí redimimos solos) de un bloqueo real
+// que Vero tiene que resolver a mano en Binance. Solo real, no testnet.
+async function getLockedEarnPosition(asset = "ETH") {
+    // GET /sapi/v1/simple-earn/locked/position — filas con { asset, amount, productId, ... }.
+    const r = await signedCall("GET", "/sapi/v1/simple-earn/locked/position", { asset, size: 100 });
+    return (r && r.rows) || [];
+}
+
 module.exports = {
     getConfig, sign, toQuery, roundStep, roundTick,
     getPrice, getSymbolRules, getBalances, getOpenOrders, getMyTrades,
     placeMarketBuy, placeOcoSell, cancelOrder, testAuth,
-    getFlexibleEarnPosition, redeemFlexibleEarn,
+    getFlexibleEarnPosition, redeemFlexibleEarn, getLockedEarnPosition,
     publicCall, signedCall,
 };
