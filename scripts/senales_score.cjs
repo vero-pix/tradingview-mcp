@@ -21,13 +21,24 @@
 const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
+const bn = require("./binance_client.cjs");   // fuente ÚNICA del veredicto: fills reales
+// FUENTE ÚNICA del PnL realizado — el MISMO módulo que lee VQL (lib/pnl/realized-pnl.cjs).
+// Misma ventana (WINDOW_DAYS) y mismo cálculo FIFO → Telegram y VQL dan idéntico.
+const pnlLib = require("./lib/realized-pnl.cjs");
 
 const DIARIO = path.join(process.env.HOME, "Trading", "senales_aplus.jsonl");
 const HOSTS = ["api.binance.com", "data-api.binance.vision", "api1.binance.com"];
-const WR_ESPERADO = 80;          // del backtest 2026-07-02
-const WR_ALERTA = 65;            // bajo esto (con muestra suficiente) → avisar
-const MIN_MUESTRA = 8;           // señales resueltas mínimas para el veredicto
-const SPREAD = { ETHUSDT: 1.75, BTCUSDT: 50 };
+const WR_ESPERADO = 80;          // del backtest 2026-07-02 (dato SECUNDARIO, ya no gatilla)
+const MIN_TRADES = 20;           // muestra mínima: 20 trades reales CERRADOS (cantidad, NO días)
+// Banda muerta del semáforo (override por env; default = del módulo compartido).
+const DEADBAND_USD = process.env.DEADBAND_USD != null ? Number(process.env.DEADBAND_USD) : pnlLib.DEFAULT_DEADBAND_USD;
+const T_CRIT       = process.env.T_CRIT       != null ? Number(process.env.T_CRIT)       : pnlLib.DEFAULT_T_CRIT;
+// Costo de operar: comisión REAL de Binance spot, PORCENTUAL sobre el nocional.
+// Medida en la cuenta de Vero: 0,0742 % por lado = el tier con descuento BNB (0,075 %),
+// o sea ~0,15 % round-trip. Antes acá había un spread FIJO en dólares
+// ({ ETHUSDT: 1.75, BTCUSDT: 50 }) heredado del CFD de Capital.com: no escalaba con el
+// precio y, en BTC, inflaba el pnl/u hasta tapar por completo al de ETH.
+const FEE_RATE = process.env.BINANCE_FEE_RATE != null ? Number(process.env.BINANCE_FEE_RATE) : 0.00075;
 const REPORTE = process.argv.includes("--reporte");
 
 async function klinesDesde(symbol, tsMs) {
@@ -47,6 +58,40 @@ async function klinesDesde(symbol, tsMs) {
     return bars;
 }
 
+// Precios spot de TODO el exchange (endpoint público, sin firma) para valorizar
+// comisiones a USD — MISMO método que VQL (feeToUsd con el mapa de precios). Ante
+// fallo devuelve {} (la fee no-USDT cae a 0, neutro).
+async function fetchPreciosSpot() {
+    for (const h of HOSTS) {
+        try {
+            const r = await fetch(`https://${h}/api/v3/ticker/price`);
+            if (r.ok) {
+                const arr = await r.json();
+                const m = {};
+                for (const it of arr) m[it.symbol] = Number(it.price);
+                return m;
+            }
+        } catch (e) {}
+    }
+    return {};
+}
+
+// Rendimiento REAL desde myTrades — delega TODO el cálculo al módulo compartido
+// (pnlLib): FIFO idéntico, ventana WINDOW_DAYS idéntica, fees a USD idénticas. Así
+// este reporte y la vista de VQL dan los MISMOS números. Devuelve { error } si no
+// pudo leer los fills. El neto es USDT REALES: perder acá es perder plata de verdad.
+async function rendimientoRealBinance(symbol) {
+    let fills;
+    try { fills = await bn.getMyTrades(symbol, 1000); }
+    catch (e) { return { error: e.message }; }
+    const prices = await fetchPreciosSpot();
+    const { closed: all } = pnlLib.deriveClosedTrades(fills || [], prices);
+    const closed = pnlLib.filterByWindow(all, { windowDays: pnlLib.WINDOW_DAYS });
+    const summary = pnlLib.summarize(closed);
+    const verdict = pnlLib.edgeVerdict(closed, { minTrades: MIN_TRADES, deadbandUsd: DEADBAND_USD, tCrit: T_CRIT });
+    return { closed, summary, verdict };
+}
+
 (async () => {
     if (!fs.existsSync(DIARIO)) { console.log("Sin diario de señales todavía (0 señales disparadas)."); if (REPORTE) notify("Score A+ · Vero", "Aún no hay señales A+ registradas para evaluar. (El diario se llena solo con cada aviso del detector.)", "Glass"); return; }
     const lineas = fs.readFileSync(DIARIO, "utf8").split("\n").filter(Boolean);
@@ -61,28 +106,31 @@ async function klinesDesde(symbol, tsMs) {
             if (b.high >= s.tp) { s.resultado = "target"; s.resuelto_ts = b.time; break; }
         }
         if (s.resultado) {
-            const spread = SPREAD[s.symbol] ?? 1.75;
-            s.pnl = +(((s.resultado === "target" ? s.tp : s.sl) - s.entry) - spread).toFixed(2);
+            // Comisión de entrada + de salida, ambas sobre el nocional de UNA unidad.
+            const salida = s.resultado === "target" ? s.tp : s.sl;
+            const costo  = FEE_RATE * (s.entry + salida);
+            s.pnl = +((salida - s.entry) - costo).toFixed(2);
             cambiado = true;
             console.log(`resuelta: ${s.fecha} ${s.epic} ${s.entry} → ${s.resultado === "target" ? "🎯 TARGET" : "🛑 STOP"} (pnl/u ${s.pnl >= 0 ? "+" : ""}$${s.pnl})`);
         }
     }
     if (cambiado) fs.writeFileSync(DIARIO, senales.map(s => JSON.stringify(s)).join("\n") + "\n");
 
-    // ---- resumen (últimos 14 días) ----
-    const hace14d = Date.now() - 14 * 86400000;
-    const rec = senales.filter(s => s.ts >= hace14d);
-    const res = rec.filter(s => s.resultado);
-    const pend = rec.length - res.length;
-    const wins = res.filter(s => s.resultado === "target").length;
-    const wr = res.length ? Math.round(wins / res.length * 100) : null;
-    const neto = res.reduce((a, s) => a + (s.pnl || 0), 0);
+    // ---- veredicto: SOLO trades reales CERRADOS en Binance (ETH-only) ----
+    // (el diario simulado de arriba se mantiene para otros consumidores; el semáforo
+    //  del reporte YA NO sale de ahí — sale de myTrades casado FIFO)
+    const fmt = n => (n < 0 ? "-" : "+") + "$" + Math.abs(Number(n)).toFixed(2);
+    const real = await rendimientoRealBinance("ETHUSDT");
+    // atajos legibles derivados del módulo compartido
+    const S = real.summary, V = real.verdict;
+    const cerrados = S ? S.nTrades : 0;
+    const neto     = S ? S.netAcum : 0;
+    const wr       = S && S.nTrades ? Math.round(S.winRate * 100) : null;
 
-    console.log("\n════ SCORE A+ (últimos 14 días) ════");
-    console.log(`Señales: ${rec.length} (${res.length} resueltas, ${pend} abiertas)`);
-    if (wr != null) {
-        console.log(`WR real: ${wr}% (esperado backtest: ${WR_ESPERADO}%) · Neto/u: ${neto >= 0 ? "+" : ""}$${neto.toFixed(2)}`);
-    }
+    console.log(`\n════ SCORE A+ ETH — trades REALES cerrados en Binance (${pnlLib.WINDOW_DAYS}d) ════`);
+    if (real.error)     console.log(`No pude leer Binance: ${real.error}`);
+    else if (!cerrados) console.log("0 trades cerrados en Binance todavía.");
+    else console.log(`Neto realizado: ${fmt(neto)} · cerrados: ${cerrados}/${MIN_TRADES} · WR ${wr}% · t=${V.tStat.toFixed(2)} · veredicto ${V.estado}`);
 
     // ---- radar de casi-señales: qué tan cerca estuvo el mercado del A+ (24h) ----
     const CASI = path.join(process.env.HOME, "Trading", "casi_senales.jsonl");
@@ -110,17 +158,41 @@ async function klinesDesde(symbol, tsMs) {
         }
     }
 
+    // Semáforo con BANDA MUERTA (viene del módulo compartido, edgeVerdict):
+    //  gris_muestra   <20 cerrados            → sin veredicto
+    //  gris_breakeven |neto| ≤ banda muerta   → breakeven, NO es perder plata
+    //  gris_ruido     neto<0 pero no signif.  → ruido, tampoco rojo
+    //  rojo           neto<-banda Y t≤-Tcrit  → edge degradado DE VERDAD
+    //  verde          neto>banda              → edge vivo (con chequeo de enfriamiento)
     let titulo = "Score A+ · Vero", msg, sonido = "Glass";
-    if (!res.length) {
-        msg = `📊 Score A+ (14d): ${rec.length} señales, ninguna resuelta aún. Sin datos para comparar con el backtest todavía.`;
-    } else if (res.length < MIN_MUESTRA) {
-        msg = `📊 Score A+ (14d): ${res.length} resueltas · WR ${wr}% · neto ${neto >= 0 ? "+" : ""}$${neto.toFixed(2)}/u. Muestra chica aún (mínimo ${MIN_MUESTRA} para veredicto). Esperado: WR ${WR_ESPERADO}%.`;
-    } else if (wr < WR_ALERTA) {
-        titulo = "⚠️ Edge degradado · A+";
+    const now = Date.now(), mitad = now - 7 * 86400000;
+    const tExit = c => new Date(c.exitTime).getTime();
+    const netoRec  = real.closed ? real.closed.filter(c => tExit(c) >= mitad).reduce((a, c) => a + c.netPnl, 0) : 0;
+    const netoPrev = real.closed ? real.closed.filter(c => tExit(c) <  mitad).reduce((a, c) => a + c.netPnl, 0) : 0;
+    const cola = cerrados
+        ? `Neto realizado ETH ${fmt(neto)} en ${cerrados} trades cerrados (${pnlLib.WINDOW_DAYS}d) · WR ${wr}% (secundario, backtest ${WR_ESPERADO}%).`
+        : "";
+    const banda = `banda muerta ±${fmt(DEADBAND_USD).replace("+", "")}`;
+
+    if (real.error) {
+        msg = `📊 Score A+ ETH: no pude leer los trades de Binance (${real.error}). Sin veredicto — reviso llaves/red y reintento.`;
+    } else if (V.estado === "gris_muestra") {
+        msg = cerrados
+            ? `📊 Score A+ ETH (${pnlLib.WINDOW_DAYS}d): ${cola} Muestra en formación (${cerrados}/${MIN_TRADES} trades cerrados reales) — sin veredicto de edge todavía. El semáforo se prende recién a los ${MIN_TRADES}.`
+            : `📊 Score A+ ETH (${pnlLib.WINDOW_DAYS}d): 0 trades cerrados en Binance todavía. Muestra en formación (0/${MIN_TRADES}) — sin veredicto de edge.`;
+    } else if (V.estado === "gris_breakeven") {
+        msg = `⚪ Edge ETH en BREAKEVEN (${banda}): ${cola} ${fmt(neto)} en ${cerrados} trades es ~cero, NO es perder plata. Sin alarma.`;
+    } else if (V.estado === "gris_ruido") {
+        msg = `⚪ Edge ETH levemente negativo pero dentro del RUIDO (t=${V.tStat.toFixed(2)}, no distinguible de cero): ${cola} Aún no es señal de degradación. Sin alarma.`;
+    } else if (V.estado === "rojo") {
+        titulo = "⚠️ Edge degradado · A+ ETH";
         sonido = "Basso";
-        msg = `🔴 El A+ real rinde BAJO lo esperado: WR ${wr}% vs ${WR_ESPERADO}% del backtest (${res.length} señales, 14d). Neto ${neto >= 0 ? "+" : ""}$${neto.toFixed(2)}/u. Sugerencia: correr el barrido con Claude y recalibrar JUNTAS. No aflojar a mano.`;
+        msg = `🔴 Edge ETH en rojo DE VERDAD: neto ${fmt(neto)} fuera de la ${banda} Y estadísticamente negativo (t=${V.tStat.toFixed(2)} ≤ -${T_CRIT}). ${cola} Correr el barrido con Claude y recalibrar JUNTAS — no aflojar a mano.`;
+    } else if (netoRec < 0 && netoPrev > 0) {
+        titulo = "🟡 Edge enfriándose · A+ ETH";
+        msg = `🟡 Edge ETH aún en verde (${cola}) pero enfriándose: últimos 7d ${fmt(netoRec)} vs 7d previos ${fmt(netoPrev)}. Sin alarma, ojo nomás.`;
     } else {
-        msg = `🟢 El A+ real rinde según lo esperado: WR ${wr}% (backtest: ${WR_ESPERADO}%), neto ${neto >= 0 ? "+" : ""}$${neto.toFixed(2)}/u en ${res.length} señales (14d). El edge sigue vivo.`;
+        msg = `🟢 Edge ETH vivo: ${cola} WR bajo el backtest NO es perder plata si el neto es positivo.`;
     }
     msg += casiMsg;
     console.log("\n" + msg + "\n");

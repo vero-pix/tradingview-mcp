@@ -18,7 +18,8 @@
 //
 // Env: AUTO_SIZE (def 0.005), WINDOW_MIN (def 5), SYMBOL (def ETHUSDT),
 //      EPIC_MATCH (def ETHUSD), INTERVAL (seg, def 5),
-//      SENALES_FILE / STATE_FILE (override para pruebas).
+//      BLOCK_REGIMES (lista separada por comas; def vacío = no bloquea nada),
+//      SENALES_FILE / STATE_FILE / RECHAZOS_FILE (override para pruebas).
 // =============================================================================
 
 const { execFileSync } = require("child_process");
@@ -30,6 +31,7 @@ const HOME    = process.env.HOME;
 const DIR     = path.join(HOME, "Trading", "tradingview-mcp");
 const SENALES = process.env.SENALES_FILE || path.join(HOME, "Trading", "senales_aplus.jsonl");
 const STATE   = process.env.STATE_FILE   || path.join(HOME, "Trading", ".autoexec_last.json");
+const RECHAZOS = process.env.RECHAZOS_FILE || path.join(HOME, "Trading", "autoexec_rechazos.jsonl");
 const NODE    = process.execPath;
 
 const argv = process.argv.slice(2);
@@ -43,8 +45,25 @@ const INTERVAL   = (process.env.INTERVAL ? Number(process.env.INTERVAL) : 5) * 1
 const SLIPPAGE   = 1.005;  // +0.5% sobre el nocional para cubrir slippage del market buy
 const REDEEM_BUFFER = process.env.REDEEM_BUFFER != null ? Number(process.env.REDEEM_BUFFER) : 0.5; // USDT extra a redimir
 
+// --- Compuerta de régimen ---------------------------------------------------
+// Bloquea la EJECUCIÓN en los regímenes listados en BLOCK_REGIMES. NO toca la
+// detección: la señal igual se detecta, se avisa y se registra en senales_aplus.jsonl;
+// lo único que cambia es que no se compra. Los rechazos quedan auditables en
+// autoexec_rechazos.jsonl para cruzarlos después contra las señales.
+// El detector escribe "volátil" con tilde: se normaliza para que BLOCK_REGIMES=volatil calce.
+function normRegimen(s) {
+    return String(s || "").trim().toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+}
+const BLOCK_REGIMES = (process.env.BLOCK_REGIMES || "").split(",").map(normRegimen).filter(Boolean);
+
 function ts() { return new Date().toISOString().slice(11, 19); }
 function notify(t, m, s) { try { execFileSync("bash", [path.join(DIR, "scripts", "notify.sh"), t, m, s], { stdio: "ignore" }); } catch (e) {} }
+
+function registrarRechazo(sig, motivo) {
+    const linea = { ts: Date.now(), senal_ts: sig.ts, symbol: sig.symbol,
+                    entry: sig.entry, regimen: sig.regimen ?? null, motivo };
+    try { fs.appendFileSync(RECHAZOS, JSON.stringify(linea) + "\n"); } catch (e) {}
+}
 
 function lastProcessed() { try { return JSON.parse(fs.readFileSync(STATE, "utf8")).ts || 0; } catch (e) { return 0; } }
 function setProcessed(t) { try { fs.writeFileSync(STATE, JSON.stringify({ ts: t })); } catch (e) {} }
@@ -166,7 +185,16 @@ async function tick() {
         return;
     }
 
-    console.log(`${ts()} 🎯 A+ NUEVA ${SYMBOL} entry~${sig.entry} sl ${sig.sl} tp ${sig.tp} → ejecutando (${live ? "LIVE" : "dry-run"})`);
+    // Compuerta de régimen: última parada antes de tocar plata.
+    const reg = normRegimen(sig.regimen);
+    if (reg && BLOCK_REGIMES.includes(reg)) {
+        const motivo = `filtro_regimen_${reg}`;
+        console.log(`${ts()} 🚫 A+ ${sig.ts} régimen "${sig.regimen}" bloqueado (${motivo}) — no ejecuto`);
+        registrarRechazo(sig, motivo);
+        return;
+    }
+
+    console.log(`${ts()} 🎯 A+ NUEVA ${SYMBOL} entry~${sig.entry} sl ${sig.sl} tp ${sig.tp} régimen ${sig.regimen || "?"} → ejecutando (${live ? "LIVE" : "dry-run"})`);
 
     // Red de seguridad: asegura USDT libre en Spot (redime de Earn si hace falta)
     // ANTES de comprar. Si no se puede cubrir, no compra y muestra el motivo.
@@ -189,7 +217,8 @@ async function tick() {
 }
 
 (async () => {
-    console.log(`${ts()} Binance auto-exec ${live ? "LIVE (abre solo)" : "dry-run"} — ${SYMBOL} size ${AUTO_SIZE}, ventana ${WINDOW_MS / 60000}min, cada ${INTERVAL / 1000}s`);
+    const regTxt = BLOCK_REGIMES.length ? `bloquea régimen [${BLOCK_REGIMES.join(", ")}]` : "sin filtro de régimen";
+    console.log(`${ts()} Binance auto-exec ${live ? "LIVE (abre solo)" : "dry-run"} — ${SYMBOL} size ${AUTO_SIZE}, ventana ${WINDOW_MS / 60000}min, cada ${INTERVAL / 1000}s, ${regTxt}`);
     for (;;) {
         try { await tick(); }
         catch (e) { console.log(`${ts()} err: ${e.message}`); }
