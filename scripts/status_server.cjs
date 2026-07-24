@@ -4,7 +4,7 @@
 //
 // Expone el estado del host que corre los detectores/bot/guardianes para que VQL
 // (la interfaz) lo consuma por HTTP. NO ejecuta ni escribe NADA: solo lee
-// systemd/launchd, /proc o vm_stat, los logs /tmp/vero_*.log y los .jsonl.
+// systemd/launchd, /proc o vm_stat, los logs de ~/Trading/logs y los .jsonl.
 //
 // Portable: Linux (systemd + /proc, el VPS) y macOS (launchd + vm_stat, test local).
 //
@@ -16,6 +16,7 @@
 //
 // Env: STATUS_API_TOKEN (obligatorio para exponer), HOST (default 127.0.0.1),
 //      PORT (default 8787), TRADING_DATA_PATH (default ~/Trading),
+//      VERO_LOG_DIR (logs persistentes, default ~/Trading/logs),
 //      VERO_UNIT_PREFIX (systemd, default "vero"), VERO_LAUNCHD_PREFIX (default "cl.vero").
 // =============================================================================
 
@@ -29,6 +30,7 @@ const HOST = process.env.HOST || "127.0.0.1";
 const PORT = Number(process.env.PORT || 8787);
 const TOKEN = process.env.STATUS_API_TOKEN || "";
 const TRADING = process.env.TRADING_DATA_PATH || path.join(os.homedir(), "Trading");
+const LOG_DIR = process.env.VERO_LOG_DIR || path.join(TRADING, "logs");   // logs persistentes (antes /tmp)
 const UNIT_PREFIX = process.env.VERO_UNIT_PREFIX || "vero";        // systemd: vero-<id>.service
 const LAUNCHD_PREFIX = process.env.VERO_LAUNCHD_PREFIX || "cl.vero"; // launchd: cl.vero.<id>
 const IS_LINUX = process.platform === "linux";
@@ -235,7 +237,7 @@ function logTimestamp(file, hhmmss) {
   } catch { return new Date().toISOString(); }
 }
 function telegramSnapshot() {
-  const log = "/tmp/vero_bot.log";
+  const log = path.join(LOG_DIR, "vero_bot.log");
   const svc = services().find((s) => s.id === "telegrambot");
   const botStatus = svc ? (svc.status === "running" ? "running" : svc.status === "restarting" ? "error" : "stopped") : "stopped";
   const uptime = svc?.uptime && svc.uptime !== "—" ? svc.uptime : "—";
@@ -268,13 +270,11 @@ function readJsonl(file) {
   } catch { return []; }
 }
 function feed() {
-  // Señales armadas en /tmp/vero_pending_*.json.
-  let pending = [];
-  try {
-    pending = fs.readdirSync("/tmp").filter((f) => /^vero_pending_.+\.json$/.test(f))
-      .map((f) => { try { return JSON.parse(fs.readFileSync(path.join("/tmp", f), "utf8")); } catch { return null; } })
-      .filter(Boolean);
-  } catch { pending = []; }
+  // 'pending' era la señal armada que esperaba el tap ✅/❌ del bot (archivos
+  // /tmp/vero_pending_*.json). Esa ruta se retiró con Capital.com: hoy la ejecución
+  // es automática (binance_autoexec) y no hay confirmación pendiente. Se mantiene el
+  // campo vacío por compatibilidad con el contrato que espera VQL.
+  const pending = [];
 
   const signals = readJsonl(path.join(TRADING, "senales_aplus.jsonl"));
   const lastSignals = signals.slice(-8).reverse();

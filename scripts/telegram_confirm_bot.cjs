@@ -55,7 +55,7 @@ const API   = `https://api.telegram.org/bot${TOKEN}`;
 
 // --- Mantenedor: control de la autocompra (compartido con binance_autoexec) ---
 const CONTROL_FILE  = path.join(HOME, "Trading", "control", "autoexec_control.json");
-const MANT_LOG      = "/tmp/vero_mantenedor.log";
+const MANT_LOG      = path.join(HOME, "Trading", "logs", "vero_mantenedor.log");
 const SIZE_CAP_HARD = 0.02;
 function leerControlAuto() {
     try { return JSON.parse(fs.readFileSync(CONTROL_FILE, "utf8")); }
