@@ -18,8 +18,10 @@ if echo "$BN" | grep -q "STOP_LOSS"; then BN_PROT="🛡️ protegida (OCO)"; els
 fi
 
 # --- Auto-ejecución de la noche (últimas ejecuciones registradas hoy) ---
-AUTO=$(grep -c "A+ NUEVA" /tmp/vero_binanceautoexec.log 2>/dev/null || echo 0)
-AUTO_HOY=$(grep "A+ NUEVA" /tmp/vero_binanceautoexec.log 2>/dev/null | tail -3 | sed -E 's/^([0-9:]+).*entry~([0-9.]+).*/\1 entry \2/' | tr '\n' ' ')
+# El log vive en ~/Trading/logs (persistente); /tmp se borra al reiniciar el server.
+LOG_AUTOEXEC="${LOG_AUTOEXEC:-$HOME/Trading/logs/vero_binanceautoexec.log}"
+AUTO=$(grep -c "A+ NUEVA" "$LOG_AUTOEXEC" 2>/dev/null || echo 0)
+AUTO_HOY=$(grep "A+ NUEVA" "$LOG_AUTOEXEC" 2>/dev/null | tail -3 | sed -E 's/^([0-9:]+).*entry~([0-9.]+).*/\1 entry \2/' | tr '\n' ' ')
 
 # --- Shadow vs real: conteo de señales ---
 REAL_N=$([ -f "$HOME/Trading/senales_aplus.jsonl" ] && wc -l < "$HOME/Trading/senales_aplus.jsonl" || echo 0)
