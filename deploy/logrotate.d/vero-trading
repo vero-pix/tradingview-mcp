@@ -1,0 +1,15 @@
+# Rotación de los logs de trading de Vero (persistentes en ~/Trading/logs).
+# Los escriben servicios systemd con el archivo ABIERTO (StandardOutput=append:),
+# por eso copytruncate: copia el log, lo trunca en sitio y el servicio sigue
+# escribiendo en el MISMO inode — no hay que reiniciar nada.
+/root/Trading/logs/*.log {
+    daily
+    maxsize 50M
+    rotate 14
+    compress
+    delaycompress
+    copytruncate
+    missingok
+    notifempty
+    nocreate
+}
